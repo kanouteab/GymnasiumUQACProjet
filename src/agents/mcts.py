@@ -96,7 +96,7 @@ class MCTSAgent:
 
     # Core MCTS phases
     def _make_root(self, board: np.ndarray, player: int) -> Node:
-        root = Node(board=board.copy(), player_to_move=player)
+        root = Node(board=board, player_to_move=player)
         root.untried_moves = self._legal_moves_with_pass(root.board, root.player_to_move)
         return root
 
@@ -132,7 +132,7 @@ class MCTSAgent:
 
         # Apply move (or pass)
         if move is None:
-            next_board = node.board.copy()
+            next_board = node.board   # PASS : plateau inchangé (tuple immutable)
             next_player = -node.player_to_move
         else:
             next_board = apply_move(node.board, node.player_to_move, move)
@@ -154,7 +154,7 @@ class MCTSAgent:
         Simulation/Rollout: jouer aléatoirement jusqu'au terminal (ou max steps).
         Retour: valeur du point de vue root_player.
         """
-        board = node.board.copy()
+        board = node.board  # tuple immutable, pas besoin de copie
         player = node.player_to_move
 
         # Rollout random

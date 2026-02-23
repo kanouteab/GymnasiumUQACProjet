@@ -1,4 +1,4 @@
-# src/experiments/benchmark.py
+# src/experiments/benchmarks.py
 import random
 from time import perf_counter
 
@@ -81,4 +81,4 @@ def bench(n_games=20, seed=0, mcts_sims=800, ab_depth=4):
 
 
 if __name__ == "__main__":
-    bench(n_games=20, seed=0, mcts_sims=800, ab_depth=4)
+    bench(n_games=3, seed=0, mcts_sims=80, ab_depth=4)
