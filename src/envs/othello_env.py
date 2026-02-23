@@ -13,6 +13,15 @@ except Exception:
     gym = None
     spaces = None
 
+# Numba est requis — installer via : pip install numba
+try:
+    import numba
+except ImportError as e:
+    raise ImportError(
+        "Numba est requis.\n"
+        "Installer via : pip install numba"
+    ) from e
+
 '''
 ─────────────────────────────────────────────────────────────────
 Représentation : BITBOARDS
@@ -36,22 +45,8 @@ BOARD_SIZE = 8
 FULL: int = 0xFFFF_FFFF_FFFF_FFFF   # 64 bits à 1
 
 # Masques colonnes (pour éviter le wrap-around lors des shifts)
-#   NOT_A_FILE : interdit colonne 0 avant un shift vers l'Ouest
-#   NOT_H_FILE : interdit colonne 7 avant un shift vers l'Est
-NOT_A_FILE: int = 0xFEFE_FEFE_FEFE_FEFE   # col != 0
-NOT_H_FILE: int = 0x7F7F_7F7F_7F7F_7F7F   # col != 7
-
-# ── 8 directions sous forme (décalage, masque_colonne) ──────────
-# décalage > 0 → left-shift (<<), < 0 → right-shift (>>)
-# Vérification :
-#   E  : bit+1 = col+1          → <<1, masquer col 7
-#   W  : bit-1 = col-1          → >>1, masquer col 0
-#   S  : bit+8 = row+1          → <<8, pas de masque
-#   N  : bit-8 = row-1          → >>8, pas de masque
-#   SE : bit+9 = row+1,col+1    → <<9, masquer col 7
-#   SW : bit+7 = row+1,col-1    → <<7, masquer col 0
-#   NE : bit-7 = row-1,col+1    → >>7, masquer col 7
-#   NW : bit-9 = row-1,col-1    → >>9, masquer col 0
+NOT_A_FILE: int = 0xFEFE_FEFE_FEFE_FEFE   # col != 0  (used for W/SW/NW)
+NOT_H_FILE: int = 0x7F7F_7F7F_7F7F_7F7F   # col != 7  (used for E/SE/NE)
 
 _DIRECTIONS: List[Tuple[int, int]] = [
     ( 8, FULL),        # S
@@ -65,69 +60,235 @@ _DIRECTIONS: List[Tuple[int, int]] = [
 ]
 
 # ─────────────────────────────────────────────────────────────────
-# Primitives bitboard  (fonctions internes)
+# Kernels JIT Numba  (uint64, directions déroulées explicitement)
+#
+#   @njit n'accepte pas les boucles sur des listes Python.
+#   Les 8 directions sont donc écrites en clair — le compilateur
+#   LLVM peut en plus les vectoriser / pipeline automatiquement.
+#
+#   Numba exige des types à largeur fixe. uint64 wrappe naturellement
+#   à 2^64 (même comportement qu'un registre CPU 64-bit), ce qui est
+#   exactement ce qu'on veut pour un bitboard 64 cases.
+#
+# cache=True
+#   Le bytecode compilé LLVM est sauvegardé sur disque dans __pycache__.
+#   Le "warm-up" (~2s) n'a lieu qu'une seule fois ; les runs suivants
+#   chargent directement le binaire.
 # ─────────────────────────────────────────────────────────────────
 
-def _shift(bb: int, d: int, mask: int) -> int:
-    """Applique le masque puis le décalage dans une direction."""
-    bb &= mask
-    if d > 0:
-        return (bb << d) & FULL
-    return bb >> (-d)
-
-
-def _popcount(bb: int) -> int:
-    """Nombre de bits à 1."""
-    return bin(bb).count('1')
-
-
-def _legal_moves_bb(my_bb: int, opp_bb: int) -> int:
+@numba.njit(cache=True)
+def _popcount_nb(bb: np.uint64) -> np.int64:
     """
-    Retourne un bitboard de tous les coups légaux pour le joueur
-    dont les pions sont dans my_bb.
-
-    Algorithme Dumb-7 fill :
-      Pour chaque direction, on propage depuis NOS pions à travers
-      les pions ADVERSES (flood). Si la case suivante est vide,
-      c'est un coup légal.
-      6 étapes de propagation suffisent (max. 6 pions adverses
-      en ligne sur un plateau 8×8).
+    Algorithme de Brian Kernighan : bb & (bb-1) efface le bit le plus bas.
+    Itère seulement autant de fois qu'il y a de bits à 1 (max 64).
+    bin().count('1') n'est pas supporté par Numba.
     """
-    empty = (~(my_bb | opp_bb)) & FULL
-    legal = 0
-    for d, mask in _DIRECTIONS:
-        flood = _shift(my_bb, d, mask) & opp_bb
-        flood |= _shift(flood, d, mask) & opp_bb
-        flood |= _shift(flood, d, mask) & opp_bb
-        flood |= _shift(flood, d, mask) & opp_bb
-        flood |= _shift(flood, d, mask) & opp_bb
-        flood |= _shift(flood, d, mask) & opp_bb
-        legal |= _shift(flood, d, mask) & empty
+    count = np.int64(0)
+    while bb:
+        bb = bb & (bb - np.uint64(1))
+        count += np.int64(1)
+    return count
+
+@numba.njit(cache=True)
+def _legal_moves_nb(my: np.uint64, opp: np.uint64) -> np.uint64:
+    """
+    Dumb-7 fill JIT : coups légaux pour le joueur 'my' contre 'opp'.
+
+    Pour chaque direction :
+      1. On masque les bits du flood avant de shifter (évite wrap-around).
+      2. On propage à travers les pions adverses (& opp), 6 fois max.
+      3. La case après le flood doit être vide → coup légal.
+
+    Chaque bloc de ~8 lignes = une direction. LLVM les compile
+    en code machine natif sans interpréteur Python.
+    """
+    NOT_H = np.uint64(0x7F7F_7F7F_7F7F_7F7F)
+    NOT_A = np.uint64(0xFEFE_FEFE_FEFE_FEFE)
+    empty  = ~(my | opp)
+    legal  = np.uint64(0)
+
+    # ── S (+8) — pas de masque colonne ───────────────────────
+    f  = (my << np.uint64(8)) & opp
+    f |= (f  << np.uint64(8)) & opp
+    f |= (f  << np.uint64(8)) & opp
+    f |= (f  << np.uint64(8)) & opp
+    f |= (f  << np.uint64(8)) & opp
+    f |= (f  << np.uint64(8)) & opp
+    legal |= (f << np.uint64(8)) & empty
+
+    # ── N (-8) — pas de masque colonne ───────────────────────
+    f  = (my >> np.uint64(8)) & opp
+    f |= (f  >> np.uint64(8)) & opp
+    f |= (f  >> np.uint64(8)) & opp
+    f |= (f  >> np.uint64(8)) & opp
+    f |= (f  >> np.uint64(8)) & opp
+    f |= (f  >> np.uint64(8)) & opp
+    legal |= (f >> np.uint64(8)) & empty
+
+    # ── E (+1) — masque NOT_H : interdit col 7 avant <<1 ─────
+    f  = ((my & NOT_H) << np.uint64(1)) & opp
+    f |= ((f  & NOT_H) << np.uint64(1)) & opp
+    f |= ((f  & NOT_H) << np.uint64(1)) & opp
+    f |= ((f  & NOT_H) << np.uint64(1)) & opp
+    f |= ((f  & NOT_H) << np.uint64(1)) & opp
+    f |= ((f  & NOT_H) << np.uint64(1)) & opp
+    legal |= ((f & NOT_H) << np.uint64(1)) & empty
+
+    # ── W (-1) — masque NOT_A : interdit col 0 avant >>1 ─────
+    f  = ((my & NOT_A) >> np.uint64(1)) & opp
+    f |= ((f  & NOT_A) >> np.uint64(1)) & opp
+    f |= ((f  & NOT_A) >> np.uint64(1)) & opp
+    f |= ((f  & NOT_A) >> np.uint64(1)) & opp
+    f |= ((f  & NOT_A) >> np.uint64(1)) & opp
+    f |= ((f  & NOT_A) >> np.uint64(1)) & opp
+    legal |= ((f & NOT_A) >> np.uint64(1)) & empty
+
+    # ── SE (+9) — masque NOT_H ────────────────────────────────
+    f  = ((my & NOT_H) << np.uint64(9)) & opp
+    f |= ((f  & NOT_H) << np.uint64(9)) & opp
+    f |= ((f  & NOT_H) << np.uint64(9)) & opp
+    f |= ((f  & NOT_H) << np.uint64(9)) & opp
+    f |= ((f  & NOT_H) << np.uint64(9)) & opp
+    f |= ((f  & NOT_H) << np.uint64(9)) & opp
+    legal |= ((f & NOT_H) << np.uint64(9)) & empty
+
+    # ── SW (+7) — masque NOT_A ────────────────────────────────
+    f  = ((my & NOT_A) << np.uint64(7)) & opp
+    f |= ((f  & NOT_A) << np.uint64(7)) & opp
+    f |= ((f  & NOT_A) << np.uint64(7)) & opp
+    f |= ((f  & NOT_A) << np.uint64(7)) & opp
+    f |= ((f  & NOT_A) << np.uint64(7)) & opp
+    f |= ((f  & NOT_A) << np.uint64(7)) & opp
+    legal |= ((f & NOT_A) << np.uint64(7)) & empty
+
+    # ── NE (-7) — masque NOT_H ────────────────────────────────
+    f  = ((my & NOT_H) >> np.uint64(7)) & opp
+    f |= ((f  & NOT_H) >> np.uint64(7)) & opp
+    f |= ((f  & NOT_H) >> np.uint64(7)) & opp
+    f |= ((f  & NOT_H) >> np.uint64(7)) & opp
+    f |= ((f  & NOT_H) >> np.uint64(7)) & opp
+    f |= ((f  & NOT_H) >> np.uint64(7)) & opp
+    legal |= ((f & NOT_H) >> np.uint64(7)) & empty
+
+    # ── NW (-9) — masque NOT_A ────────────────────────────────
+    f  = ((my & NOT_A) >> np.uint64(9)) & opp
+    f |= ((f  & NOT_A) >> np.uint64(9)) & opp
+    f |= ((f  & NOT_A) >> np.uint64(9)) & opp
+    f |= ((f  & NOT_A) >> np.uint64(9)) & opp
+    f |= ((f  & NOT_A) >> np.uint64(9)) & opp
+    f |= ((f  & NOT_A) >> np.uint64(9)) & opp
+    legal |= ((f & NOT_A) >> np.uint64(9)) & empty
+
     return legal
 
+@numba.njit(cache=True)
+def _apply_move_nb(
+    my: np.uint64, opp: np.uint64, move_bit: np.uint64
+) -> Tuple[np.uint64, np.uint64]:
+    """
+    Même logique de flood que _legal_moves_nb, mais depuis la case jouée.
+    Un flood dans une direction est valide (→ capture) seulement si
+    la case APRÈS le flood appartient à notre joueur (my & next_step != 0).
+    """
+    NOT_H   = np.uint64(0x7F7F_7F7F_7F7F_7F7F)
+    NOT_A   = np.uint64(0xFEFE_FEFE_FEFE_FEFE)
+    flipped = np.uint64(0)
+
+    # ── S ────────────────────────────────────────────────────
+    f  = (move_bit << np.uint64(8)) & opp
+    f |= (f        << np.uint64(8)) & opp
+    f |= (f        << np.uint64(8)) & opp
+    f |= (f        << np.uint64(8)) & opp
+    f |= (f        << np.uint64(8)) & opp
+    f |= (f        << np.uint64(8)) & opp
+    if (f << np.uint64(8)) & my:
+        flipped |= f
+
+    # ── N ────────────────────────────────────────────────────
+    f  = (move_bit >> np.uint64(8)) & opp
+    f |= (f        >> np.uint64(8)) & opp
+    f |= (f        >> np.uint64(8)) & opp
+    f |= (f        >> np.uint64(8)) & opp
+    f |= (f        >> np.uint64(8)) & opp
+    f |= (f        >> np.uint64(8)) & opp
+    if (f >> np.uint64(8)) & my:
+        flipped |= f
+
+    # ── E ────────────────────────────────────────────────────
+    f  = ((move_bit & NOT_H) << np.uint64(1)) & opp
+    f |= ((f        & NOT_H) << np.uint64(1)) & opp
+    f |= ((f        & NOT_H) << np.uint64(1)) & opp
+    f |= ((f        & NOT_H) << np.uint64(1)) & opp
+    f |= ((f        & NOT_H) << np.uint64(1)) & opp
+    f |= ((f        & NOT_H) << np.uint64(1)) & opp
+    if ((f & NOT_H) << np.uint64(1)) & my:
+        flipped |= f
+
+    # ── W ────────────────────────────────────────────────────
+    f  = ((move_bit & NOT_A) >> np.uint64(1)) & opp
+    f |= ((f        & NOT_A) >> np.uint64(1)) & opp
+    f |= ((f        & NOT_A) >> np.uint64(1)) & opp
+    f |= ((f        & NOT_A) >> np.uint64(1)) & opp
+    f |= ((f        & NOT_A) >> np.uint64(1)) & opp
+    f |= ((f        & NOT_A) >> np.uint64(1)) & opp
+    if ((f & NOT_A) >> np.uint64(1)) & my:
+        flipped |= f
+
+    # ── SE ───────────────────────────────────────────────────
+    f  = ((move_bit & NOT_H) << np.uint64(9)) & opp
+    f |= ((f        & NOT_H) << np.uint64(9)) & opp
+    f |= ((f        & NOT_H) << np.uint64(9)) & opp
+    f |= ((f        & NOT_H) << np.uint64(9)) & opp
+    f |= ((f        & NOT_H) << np.uint64(9)) & opp
+    f |= ((f        & NOT_H) << np.uint64(9)) & opp
+    if ((f & NOT_H) << np.uint64(9)) & my:
+        flipped |= f
+
+    # ── SW ───────────────────────────────────────────────────
+    f  = ((move_bit & NOT_A) << np.uint64(7)) & opp
+    f |= ((f        & NOT_A) << np.uint64(7)) & opp
+    f |= ((f        & NOT_A) << np.uint64(7)) & opp
+    f |= ((f        & NOT_A) << np.uint64(7)) & opp
+    f |= ((f        & NOT_A) << np.uint64(7)) & opp
+    f |= ((f        & NOT_A) << np.uint64(7)) & opp
+    if ((f & NOT_A) << np.uint64(7)) & my:
+        flipped |= f
+
+    # ── NE ───────────────────────────────────────────────────
+    f  = ((move_bit & NOT_H) >> np.uint64(7)) & opp
+    f |= ((f        & NOT_H) >> np.uint64(7)) & opp
+    f |= ((f        & NOT_H) >> np.uint64(7)) & opp
+    f |= ((f        & NOT_H) >> np.uint64(7)) & opp
+    f |= ((f        & NOT_H) >> np.uint64(7)) & opp
+    f |= ((f        & NOT_H) >> np.uint64(7)) & opp
+    if ((f & NOT_H) >> np.uint64(7)) & my:
+        flipped |= f
+
+    # ── NW ───────────────────────────────────────────────────
+    f  = ((move_bit & NOT_A) >> np.uint64(9)) & opp
+    f |= ((f        & NOT_A) >> np.uint64(9)) & opp
+    f |= ((f        & NOT_A) >> np.uint64(9)) & opp
+    f |= ((f        & NOT_A) >> np.uint64(9)) & opp
+    f |= ((f        & NOT_A) >> np.uint64(9)) & opp
+    f |= ((f        & NOT_A) >> np.uint64(9)) & opp
+    if ((f & NOT_A) >> np.uint64(9)) & my:
+        flipped |= f
+
+    new_my  = my  | move_bit | flipped
+    new_opp = opp & ~flipped
+    return new_my, new_opp
+
+# ── Wrappers publics : Python int → uint64 → int ─────────────────
+# Les agents passent des Python int ; on convertit à la frontière.
+def _popcount(bb: int) -> int:
+    return int(_popcount_nb(np.uint64(bb)))
+
+def _legal_moves_bb(my_bb: int, opp_bb: int) -> int:
+    return int(_legal_moves_nb(np.uint64(my_bb), np.uint64(opp_bb)))
 
 def _apply_move_bb(my_bb: int, opp_bb: int, move_bit: int) -> Tuple[int, int]:
-    """
-    Applique un coup (move_bit = 1 << sq) et retourne (new_my, new_opp).
-
-    Même flood que pour les coups légaux, mais cette fois on vérifie
-    que le flood se termine sur un de MES pions. Si oui, les pions
-    du flood sont retournés.
-    """
-    flipped = 0
-    for d, mask in _DIRECTIONS:
-        flood = _shift(move_bit, d, mask) & opp_bb
-        flood |= _shift(flood, d, mask) & opp_bb
-        flood |= _shift(flood, d, mask) & opp_bb
-        flood |= _shift(flood, d, mask) & opp_bb
-        flood |= _shift(flood, d, mask) & opp_bb
-        flood |= _shift(flood, d, mask) & opp_bb
-        # Le flood est valide seulement s'il se termine sur un de nos pions
-        if _shift(flood, d, mask) & my_bb:
-            flipped |= flood
-    new_my  = (my_bb  | move_bit | flipped)
-    new_opp = (opp_bb & ~flipped)
-    return new_my, new_opp
+    r = _apply_move_nb(np.uint64(my_bb), np.uint64(opp_bb), np.uint64(move_bit))
+    return int(r[0]), int(r[1])
 
 
 # ─────────────────────────────────────────────────────────────────
