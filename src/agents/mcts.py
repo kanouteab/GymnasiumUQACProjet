@@ -14,6 +14,7 @@ from src.envs.othello_env import (
     is_terminal,
     get_winner,
     score,
+    Board,
 )
 
 Move = Tuple[int, int]  # (x,y) in [0..7]
@@ -32,7 +33,7 @@ def _result_value_from_root_perspective(winner: int, root_player: int) -> float:
 
 @dataclass
 class Node:
-    board: np.ndarray
+    board: Board                        # (black_bb, white_bb) — Tuple[np.uint64, np.uint64]
     player_to_move: int                 # +1 noir, -1 blanc
     parent: Optional["Node"] = None
     parent_move: Optional[Optional[Move]] = None  # Move or None(pass)
@@ -75,7 +76,7 @@ class MCTSAgent:
 
  
     # Public API
-    def select_move(self, board: np.ndarray, player_to_move: int) -> Optional[Move]:
+    def select_move(self, board: Board, player_to_move: int) -> Optional[Move]:
         """
         Retourne le meilleur coup (x,y) ou None pour PASS (si aucun coup légal).
         """
@@ -95,12 +96,12 @@ class MCTSAgent:
         return best_move
 
     # Core MCTS phases
-    def _make_root(self, board: np.ndarray, player: int) -> Node:
+    def _make_root(self, board: Board, player: int) -> Node:
         root = Node(board=board, player_to_move=player)
         root.untried_moves = self._legal_moves_with_pass(root.board, root.player_to_move)
         return root
 
-    def _legal_moves_with_pass(self, board: np.ndarray, player: int) -> List[Optional[Move]]:
+    def _legal_moves_with_pass(self, board: Board, player: int) -> List[Optional[Move]]:
         moves = get_legal_moves(board, player)
         if moves:
             return list(moves)

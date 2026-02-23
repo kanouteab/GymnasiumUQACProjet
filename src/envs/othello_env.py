@@ -76,7 +76,10 @@ _DIRECTIONS: List[Tuple[int, int]] = [
 #   chargent directement le binaire.
 # ─────────────────────────────────────────────────────────────────
 
-@numba.njit(cache=True)
+@numba.njit(
+    numba.int64(numba.uint64),
+    cache=True,
+)
 def _popcount_nb(bb: np.uint64) -> np.int64:
     """
     Algorithme de Brian Kernighan : bb & (bb-1) efface le bit le plus bas.
@@ -89,7 +92,10 @@ def _popcount_nb(bb: np.uint64) -> np.int64:
         count += np.int64(1)
     return count
 
-@numba.njit(cache=True)
+@numba.njit(
+    numba.uint64(numba.uint64, numba.uint64),
+    cache=True,
+)
 def _legal_moves_nb(my: np.uint64, opp: np.uint64) -> np.uint64:
     """
     Dumb-7 fill JIT : coups légaux pour le joueur 'my' contre 'opp'.
@@ -181,7 +187,10 @@ def _legal_moves_nb(my: np.uint64, opp: np.uint64) -> np.uint64:
 
     return legal
 
-@numba.njit(cache=True)
+@numba.njit(
+    numba.types.UniTuple(numba.uint64, 2)(numba.uint64, numba.uint64, numba.uint64),
+    cache=True,
+)
 def _apply_move_nb(
     my: np.uint64, opp: np.uint64, move_bit: np.uint64
 ) -> Tuple[np.uint64, np.uint64]:
@@ -192,114 +201,122 @@ def _apply_move_nb(
     """
     NOT_H   = np.uint64(0x7F7F_7F7F_7F7F_7F7F)
     NOT_A   = np.uint64(0xFEFE_FEFE_FEFE_FEFE)
+    # Note : on évite |= dans les branches conditionnelles.
+    # Numba (certaines versions) perd le type uint64 avec l'affectation
+    # augmentée en SSA → on utilise flipped = flipped | f explicitement.
     flipped = np.uint64(0)
 
-    # ── S ────────────────────────────────────────────────────
+    # ── S (+8) ──────────────────────────────────────────────
     f  = (move_bit << np.uint64(8)) & opp
-    f |= (f        << np.uint64(8)) & opp
-    f |= (f        << np.uint64(8)) & opp
-    f |= (f        << np.uint64(8)) & opp
-    f |= (f        << np.uint64(8)) & opp
-    f |= (f        << np.uint64(8)) & opp
+    f  = f | ((f << np.uint64(8)) & opp)
+    f  = f | ((f << np.uint64(8)) & opp)
+    f  = f | ((f << np.uint64(8)) & opp)
+    f  = f | ((f << np.uint64(8)) & opp)
+    f  = f | ((f << np.uint64(8)) & opp)
     if (f << np.uint64(8)) & my:
-        flipped |= f
+        flipped = flipped | f
 
-    # ── N ────────────────────────────────────────────────────
+    # ── N (−8) ──────────────────────────────────────────────
     f  = (move_bit >> np.uint64(8)) & opp
-    f |= (f        >> np.uint64(8)) & opp
-    f |= (f        >> np.uint64(8)) & opp
-    f |= (f        >> np.uint64(8)) & opp
-    f |= (f        >> np.uint64(8)) & opp
-    f |= (f        >> np.uint64(8)) & opp
+    f  = f | ((f >> np.uint64(8)) & opp)
+    f  = f | ((f >> np.uint64(8)) & opp)
+    f  = f | ((f >> np.uint64(8)) & opp)
+    f  = f | ((f >> np.uint64(8)) & opp)
+    f  = f | ((f >> np.uint64(8)) & opp)
     if (f >> np.uint64(8)) & my:
-        flipped |= f
+        flipped = flipped | f
 
-    # ── E ────────────────────────────────────────────────────
+    # ── E (+1, masque NOT_H) ─────────────────────────────────
     f  = ((move_bit & NOT_H) << np.uint64(1)) & opp
-    f |= ((f        & NOT_H) << np.uint64(1)) & opp
-    f |= ((f        & NOT_H) << np.uint64(1)) & opp
-    f |= ((f        & NOT_H) << np.uint64(1)) & opp
-    f |= ((f        & NOT_H) << np.uint64(1)) & opp
-    f |= ((f        & NOT_H) << np.uint64(1)) & opp
+    f  = f | (((f & NOT_H) << np.uint64(1)) & opp)
+    f  = f | (((f & NOT_H) << np.uint64(1)) & opp)
+    f  = f | (((f & NOT_H) << np.uint64(1)) & opp)
+    f  = f | (((f & NOT_H) << np.uint64(1)) & opp)
+    f  = f | (((f & NOT_H) << np.uint64(1)) & opp)
     if ((f & NOT_H) << np.uint64(1)) & my:
-        flipped |= f
+        flipped = flipped | f
 
-    # ── W ────────────────────────────────────────────────────
+    # ── W (−1, masque NOT_A) ─────────────────────────────────
     f  = ((move_bit & NOT_A) >> np.uint64(1)) & opp
-    f |= ((f        & NOT_A) >> np.uint64(1)) & opp
-    f |= ((f        & NOT_A) >> np.uint64(1)) & opp
-    f |= ((f        & NOT_A) >> np.uint64(1)) & opp
-    f |= ((f        & NOT_A) >> np.uint64(1)) & opp
-    f |= ((f        & NOT_A) >> np.uint64(1)) & opp
+    f  = f | (((f & NOT_A) >> np.uint64(1)) & opp)
+    f  = f | (((f & NOT_A) >> np.uint64(1)) & opp)
+    f  = f | (((f & NOT_A) >> np.uint64(1)) & opp)
+    f  = f | (((f & NOT_A) >> np.uint64(1)) & opp)
+    f  = f | (((f & NOT_A) >> np.uint64(1)) & opp)
     if ((f & NOT_A) >> np.uint64(1)) & my:
-        flipped |= f
+        flipped = flipped | f
 
-    # ── SE ───────────────────────────────────────────────────
+    # ── SE (+9, masque NOT_H) ────────────────────────────────
     f  = ((move_bit & NOT_H) << np.uint64(9)) & opp
-    f |= ((f        & NOT_H) << np.uint64(9)) & opp
-    f |= ((f        & NOT_H) << np.uint64(9)) & opp
-    f |= ((f        & NOT_H) << np.uint64(9)) & opp
-    f |= ((f        & NOT_H) << np.uint64(9)) & opp
-    f |= ((f        & NOT_H) << np.uint64(9)) & opp
+    f  = f | (((f & NOT_H) << np.uint64(9)) & opp)
+    f  = f | (((f & NOT_H) << np.uint64(9)) & opp)
+    f  = f | (((f & NOT_H) << np.uint64(9)) & opp)
+    f  = f | (((f & NOT_H) << np.uint64(9)) & opp)
+    f  = f | (((f & NOT_H) << np.uint64(9)) & opp)
     if ((f & NOT_H) << np.uint64(9)) & my:
-        flipped |= f
+        flipped = flipped | f
 
-    # ── SW ───────────────────────────────────────────────────
+    # ── SW (+7, masque NOT_A) ────────────────────────────────
     f  = ((move_bit & NOT_A) << np.uint64(7)) & opp
-    f |= ((f        & NOT_A) << np.uint64(7)) & opp
-    f |= ((f        & NOT_A) << np.uint64(7)) & opp
-    f |= ((f        & NOT_A) << np.uint64(7)) & opp
-    f |= ((f        & NOT_A) << np.uint64(7)) & opp
-    f |= ((f        & NOT_A) << np.uint64(7)) & opp
+    f  = f | (((f & NOT_A) << np.uint64(7)) & opp)
+    f  = f | (((f & NOT_A) << np.uint64(7)) & opp)
+    f  = f | (((f & NOT_A) << np.uint64(7)) & opp)
+    f  = f | (((f & NOT_A) << np.uint64(7)) & opp)
+    f  = f | (((f & NOT_A) << np.uint64(7)) & opp)
     if ((f & NOT_A) << np.uint64(7)) & my:
-        flipped |= f
+        flipped = flipped | f
 
-    # ── NE ───────────────────────────────────────────────────
+    # ── NE (−7, masque NOT_H) ────────────────────────────────
     f  = ((move_bit & NOT_H) >> np.uint64(7)) & opp
-    f |= ((f        & NOT_H) >> np.uint64(7)) & opp
-    f |= ((f        & NOT_H) >> np.uint64(7)) & opp
-    f |= ((f        & NOT_H) >> np.uint64(7)) & opp
-    f |= ((f        & NOT_H) >> np.uint64(7)) & opp
-    f |= ((f        & NOT_H) >> np.uint64(7)) & opp
+    f  = f | (((f & NOT_H) >> np.uint64(7)) & opp)
+    f  = f | (((f & NOT_H) >> np.uint64(7)) & opp)
+    f  = f | (((f & NOT_H) >> np.uint64(7)) & opp)
+    f  = f | (((f & NOT_H) >> np.uint64(7)) & opp)
+    f  = f | (((f & NOT_H) >> np.uint64(7)) & opp)
     if ((f & NOT_H) >> np.uint64(7)) & my:
-        flipped |= f
+        flipped = flipped | f
 
-    # ── NW ───────────────────────────────────────────────────
+    # ── NW (−9, masque NOT_A) ────────────────────────────────
     f  = ((move_bit & NOT_A) >> np.uint64(9)) & opp
-    f |= ((f        & NOT_A) >> np.uint64(9)) & opp
-    f |= ((f        & NOT_A) >> np.uint64(9)) & opp
-    f |= ((f        & NOT_A) >> np.uint64(9)) & opp
-    f |= ((f        & NOT_A) >> np.uint64(9)) & opp
-    f |= ((f        & NOT_A) >> np.uint64(9)) & opp
+    f  = f | (((f & NOT_A) >> np.uint64(9)) & opp)
+    f  = f | (((f & NOT_A) >> np.uint64(9)) & opp)
+    f  = f | (((f & NOT_A) >> np.uint64(9)) & opp)
+    f  = f | (((f & NOT_A) >> np.uint64(9)) & opp)
+    f  = f | (((f & NOT_A) >> np.uint64(9)) & opp)
     if ((f & NOT_A) >> np.uint64(9)) & my:
-        flipped |= f
+        flipped = flipped | f
 
     new_my  = my  | move_bit | flipped
     new_opp = opp & ~flipped
     return new_my, new_opp
 
-# ── Wrappers publics : Python int → uint64 → int ─────────────────
-# Les agents passent des Python int ; on convertit à la frontière.
-def _popcount(bb: int) -> int:
-    return int(_popcount_nb(np.uint64(bb)))
+# ── Wrappers : pass-through directs, zéro conversion ────────────
+# Board stocke maintenant np.uint64 nativement : les kernels JIT
+# reçoivent et retournent np.uint64 sans aucune boxing/unboxing.
+def _popcount(bb: np.uint64) -> int:
+    return int(_popcount_nb(bb))
 
-def _legal_moves_bb(my_bb: int, opp_bb: int) -> int:
-    return int(_legal_moves_nb(np.uint64(my_bb), np.uint64(opp_bb)))
+def _legal_moves_bb(my_bb: np.uint64, opp_bb: np.uint64) -> np.uint64:
+    return _legal_moves_nb(my_bb, opp_bb)
 
-def _apply_move_bb(my_bb: int, opp_bb: int, move_bit: int) -> Tuple[int, int]:
-    r = _apply_move_nb(np.uint64(my_bb), np.uint64(opp_bb), np.uint64(move_bit))
-    return int(r[0]), int(r[1])
+def _apply_move_bb(
+    my_bb: np.uint64, opp_bb: np.uint64, move_bit: np.uint64
+) -> Tuple[np.uint64, np.uint64]:
+    return _apply_move_nb(my_bb, opp_bb, move_bit)
 
 
 # ─────────────────────────────────────────────────────────────────
 # API publique  (même interface qu'avant pour le reste du projet)
 # ─────────────────────────────────────────────────────────────────
 
-Board = Tuple[int, int]  # (black_bb, white_bb)
-Move  = Tuple[int, int]  # (row, col)
+# Board est maintenant Tuple[np.uint64, np.uint64].
+# Les agents reçoivent et retournent ce type directement :
+# plus aucune conversion à la frontière JIT.
+Board = Tuple[np.uint64, np.uint64]  # (black_bb, white_bb)
+Move  = Tuple[int, int]              # (row, col) — inchangé
 
 
-def _player_boards(board: Board, player: int) -> Tuple[int, int]:
+def _player_boards(board: Board, player: int) -> Tuple[np.uint64, np.uint64]:
     """Retourne (my_bb, opp_bb) selon player."""
     black_bb, white_bb = board
     if player == 1:
@@ -311,22 +328,23 @@ def initial_board() -> Board:
     """Plateau initial d'Othello 8×8."""
     # Noir  : (3,4)→sq28, (4,3)→sq35
     # Blanc : (3,3)→sq27, (4,4)→sq36
-    black_bb = (1 << 28) | (1 << 35)
-    white_bb = (1 << 27) | (1 << 36)
+    # np.uint64 dès la construction : aucune conversion jamais nécessaire.
+    black_bb = np.uint64((1 << 28) | (1 << 35))
+    white_bb = np.uint64((1 << 27) | (1 << 36))
     return (black_bb, white_bb)
 
 
 def get_legal_moves(board: Board, player: int) -> List[Move]:
     """Liste de tous les coups légaux (row, col) pour player."""
     my_bb, opp_bb = _player_boards(board, player)
-    legal_bb = _legal_moves_bb(my_bb, opp_bb)
+    legal_bb = _legal_moves_bb(my_bb, opp_bb)  # np.uint64
     moves: List[Move] = []
     bb = legal_bb
     while bb:
-        lsb = bb & (-bb)               # bit le plus bas isolé
-        sq  = lsb.bit_length() - 1     # indice de ce bit
-        moves.append((sq >> 3, sq & 7))  # (sq//8, sq%8)
-        bb ^= lsb                      # retirer ce bit
+        lsb = bb & (-bb)                    # np.uint64 : -bb wrappe en uint64 (deux's complement)
+        sq  = int(lsb).bit_length() - 1     # int() requis : np.uint64 n'a pas .bit_length()
+        moves.append((sq >> 3, sq & 7))     # (sq//8, sq%8)
+        bb ^= lsb                           # retire ce bit
     return moves
 
 
@@ -334,7 +352,8 @@ def apply_move(board: Board, player: int, move: Move) -> Board:
     """Applique un coup légal (row, col) pour player et retourne le nouveau board."""
     my_bb, opp_bb = _player_boards(board, player)
     x, y = move
-    move_bit = 1 << (x * 8 + y)
+    # np.uint64 natif : aucune conversion avant d'appeler le kernel JIT
+    move_bit = np.uint64(1) << np.uint64(x * 8 + y)
     new_my, new_opp = _apply_move_bb(my_bb, opp_bb, move_bit)
     if player == 1:
         return (new_my, new_opp)
@@ -381,12 +400,12 @@ def board_to_array(board: Board) -> np.ndarray:
     bb = black_bb
     while bb:
         lsb = bb & (-bb)
-        arr[lsb.bit_length() - 1] = 1
+        arr[int(lsb).bit_length() - 1] = 1
         bb ^= lsb
     bb = white_bb
     while bb:
         lsb = bb & (-bb)
-        arr[lsb.bit_length() - 1] = -1
+        arr[int(lsb).bit_length() - 1] = -1
         bb ^= lsb
     return arr.reshape(8, 8)
 

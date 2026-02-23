@@ -45,12 +45,12 @@ def _positional_score(my_bb: int, opp_bb: int) -> float:
     bb = my_bb
     while bb:
         lsb = bb & (-bb)
-        pos += WEIGHTS_FLAT[lsb.bit_length() - 1]
+        pos += WEIGHTS_FLAT[int(lsb).bit_length() - 1]  # int() : np.uint64 n'a pas .bit_length()
         bb ^= lsb
     bb = opp_bb
     while bb:
         lsb = bb & (-bb)
-        pos -= WEIGHTS_FLAT[lsb.bit_length() - 1]
+        pos -= WEIGHTS_FLAT[int(lsb).bit_length() - 1]
         bb ^= lsb
     return float(pos)
 
