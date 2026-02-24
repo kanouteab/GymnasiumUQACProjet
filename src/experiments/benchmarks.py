@@ -46,14 +46,54 @@ def _make_agent(spec: dict, game_seed: int = 0):
 # ─────────────────────────────────────────────────────────────────
 # Logique de partie
 # ─────────────────────────────────────────────────────────────────
+def _bit_at(bb: int, r: int, c: int) -> int:
+    return (bb >> (r * 8 + c)) & 1
 
-def play_game(agent_black, agent_white, seed=0, verbose=False):
+def pretty_print(board, player: int, legal_moves=None, title: str = ""):
+    black_bb, white_bb = board
+    legal_set = set(legal_moves) if legal_moves else set()
+
+    if title:
+        print(title)
+
+    print("  A B C D E F G H")
+    print("  " + "-" * 15)
+
+    for r in range(8):
+        row_cells = []
+        for c in range(8):
+            if (r, c) in legal_set:
+                ch = "*"
+            else:
+                b = _bit_at(black_bb, r, c)
+                w = _bit_at(white_bb, r, c)
+                ch = "●" if b else ("○" if w else ".")
+            row_cells.append(ch)
+        print(f"{r+1} " + " ".join(row_cells))
+
+    nb = int(black_bb).bit_count()
+    nw = int(white_bb).bit_count()
+    who = "Noir (●)" if player == 1 else "Blanc (○)"
+    print("\nÀ jouer:", who, f"| Score: Noir={nb} Blanc={nw} (diff={nb-nw})")
+    if legal_moves is not None:
+        print("Coups légaux:", [f"{chr(ord('A')+c)}{r+1}" for (r, c) in legal_moves])
+    print()
+def play_game(agent_black, agent_white, seed=0, verbose=False, show_board=True):
     rng = random.Random(seed)
     board = initial_board()
     player = 1  # noir commence
 
+    if hasattr(agent_black, "reset_tree"):
+        agent_black.reset_tree()
+    if hasattr(agent_white, "reset_tree"):
+        agent_white.reset_tree()
+
+    move_idx = 0
     while not is_terminal(board):
         legal = get_legal_moves(board, player)
+
+        if show_board:
+            pretty_print(board, player, legal_moves=legal, title=f"Coup #{move_idx}")
 
         move = agent_black.select_move(board, player) if player == 1 \
                else agent_white.select_move(board, player)
@@ -64,14 +104,22 @@ def play_game(agent_black, agent_white, seed=0, verbose=False):
                 move = rng.choice(legal) if legal else None
             if move is not None:
                 board = apply_move(board, player, move)
+        # else PASS
 
-        player = -player
+        next_player = -player
 
-        if verbose:
-            print("Score:", score(board))
+        if hasattr(agent_black, "observe_move"):
+            agent_black.observe_move(move, board, next_player)
+        if hasattr(agent_white, "observe_move"):
+            agent_white.observe_move(move, board, next_player)
+
+        player = next_player
+        move_idx += 1
+
+    if show_board:
+        pretty_print(board, player, legal_moves=None, title="FIN DE PARTIE")
 
     return get_winner(board), score(board)
-
 
 def _worker(args):
     """
