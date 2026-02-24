@@ -524,6 +524,7 @@ def _self_test():
     assert _popcount(nb[0]) + _popcount(nb[1]) > _popcount(b[0]) + _popcount(b[1])
     print("Self-test passed!")
 
+
 if __name__ == "__main__":
     _self_test()
     if gym is not None:
