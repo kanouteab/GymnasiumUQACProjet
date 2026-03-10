@@ -1,5 +1,8 @@
+"""
+Command to launch evaluation:
+python -m src.experiments.eval_rl_vs_mcts
+"""
 import pickle
-
 from src.rl.qlearning import QLearningAgent
 from src.agents.mcts import MCTSAgent
 from src.envs.othello_env import (
@@ -78,4 +81,5 @@ print("RL (Black) vs MCTS (White)")
 print("Games:", games)
 print("RL wins:", wins[1])
 print("MCTS wins:", wins[-1])
+
 print("Draw:", wins[0])
