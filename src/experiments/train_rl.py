@@ -1,4 +1,8 @@
 # src/experiments/train_rl.py
+"""
+Command to launch training:
+python -m src.experiments.train_rl
+"""
 from __future__ import annotations
 import random
 from typing import Optional, Tuple, List
@@ -87,7 +91,7 @@ def main():
     agent = QLearningAgent(alpha=0.2, gamma=0.95, eps=1.0, eps_decay=0.995, eps_min=0.05, seed=0)
     opp = RandomAgent(seed=1)
 
-    n_episodes = 2000  # augmentez si vous voulez
+    n_episodes = 2000  # augmenter si on veut plus d'episodes
     wins = {1:0, -1:0, 0:0}
     for ep in range(1, n_episodes+1):
         w = play_episode_train(agent, opp, seed=ep)
@@ -104,4 +108,5 @@ def main():
     print("Saved Q-table -> artifacts/qtable.pkl")
 
 if __name__ == "__main__":
+
     main()
