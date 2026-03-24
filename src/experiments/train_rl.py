@@ -20,6 +20,7 @@ import pickle
 import csv
 import os
 import random
+import time
 from typing import Optional, Tuple, List
 
 from src.envs.othello_env import (
@@ -273,6 +274,8 @@ def main() -> None:
     print(f"  Phase 5 (ep {CURRICULUM_SWITCH_4+1}-{n_episodes})        : vs Alpha-Beta depth=4")
     print("=" * 65)
 
+    t0 = time.time()
+
     for ep in range(1, n_episodes + 1):
 
         # Choix de l'adversaire selon la phase du curriculum
@@ -312,11 +315,14 @@ def main() -> None:
                 phase = "AlphaBeta-d3"
             else:
                 phase = "AlphaBeta-d4"
+            elapsed = time.time() - t0
+            em, es = divmod(int(elapsed), 60)
             print(
                 f"Ep {ep:5d} [{phase:12s}] | ε={agent.eps:.4f} | "
                 f"W={wins_total[1]} L={wins_total[-1]} D={wins_total[0]} | "
                 f"WinRate last{log_every}={wr:.1%} | "
-                f"États visités={agent.n_visited()}"
+                f"États visités={agent.n_visited()} | "
+                f"+{em}m{es:02d}s"
             )
             stats.append({"ep": ep, "phase": phase, "win_rate": round(wr, 4), "eps": round(agent.eps, 4)})
 
@@ -385,6 +391,13 @@ def main() -> None:
         })
     except Exception as exc:
         print(f"  [plot] Impossible de générer le graphique final : {exc}")
+
+    total = time.time() - t0
+    th, rem = divmod(int(total), 3600)
+    tm, ts = divmod(rem, 60)
+    dur_str = (f"{th}h {tm}m {ts:02d}s" if th else f"{tm}m {ts:02d}s")
+    print()
+    print(f"Durée totale entraînement QL : {dur_str}")
 
 
 if __name__ == "__main__":

@@ -2,9 +2,11 @@
 """
 Génération des graphiques pour le rapport.
 
-  plot_learning_curve  : courbe de win-rate + epsilon pendant l'entraînement
-  plot_tournament      : heatmap des win rates inter-agents.
-  plot_final_eval      : barres des win rates finaux vs chaque adversaire.
+  plot_learning_curve      : courbe win-rate + ε (Q-Learning, 2 panneaux)
+  plot_dqn_learning_curve  : courbe win-rate + loss + ε (DQN, 3 panneaux)
+  plot_tournament          : heatmap NxN des win rates inter-agents
+  plot_final_eval          : barres horizontales des win rates finaux
+                             (paramètre prefix pour distinguer QL / DQN)
 """
 from __future__ import annotations
 
@@ -55,6 +57,7 @@ def plot_learning_curve(
     PHASE_COLORS = {
         "Random":       "#aed6f1",
         "MCTS":         "#a9dfbf",
+        "MCTS-200":     "#a9dfbf",
         "AlphaBeta-d2": "#f9e79f",
         "AlphaBeta-d3": "#f0b27a",
         "AlphaBeta-d4": "#d7bde2",
@@ -112,6 +115,113 @@ def plot_learning_curve(
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Courbe d'apprentissage → {out_path}")
+    return out_path
+
+
+# ── Courbe d'apprentissage DQN ─────────────────────────────────────────────────
+
+def plot_dqn_learning_curve(
+    csv_path: str = "artifacts/dqn_training_stats.csv",
+    out_dir:  str = "artifacts",
+) -> str:
+    """
+    Lit artifacts/dqn_training_stats.csv (produit par train_dqn.main()) et génère
+    un graphique à trois panneaux :
+      - haut   : taux de victoire (fenêtre glissante log_every épisodes)
+      - milieu : perte moyenne (Huber loss)
+      - bas    : valeur de epsilon
+    Les bandes de fond indiquent la phase du curriculum.
+    Sauvegarde dans out_dir/dqn_learning_curve.png.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+
+    ep_list:    List[int]   = []
+    wr_list:    List[float] = []
+    eps_list:   List[float] = []
+    loss_list:  List[float] = []
+    phase_list: List[str]   = []
+
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            ep_list.append(int(row["ep"]))
+            wr_list.append(float(row["win_rate"]))
+            eps_list.append(float(row["eps"]))
+            loss_list.append(float(row.get("avg_loss", 0.0)))
+            phase_list.append(row["phase"])
+
+    if not ep_list:
+        print("Aucune donnée dans le CSV DQN — courbe non générée.")
+        return ""
+
+    log_every = ep_list[1] - ep_list[0] if len(ep_list) > 1 else 200
+
+    PHASE_COLORS = {
+        "Random":       "#aed6f1",
+        "MCTS":         "#a9dfbf",
+        "MCTS-200":     "#a9dfbf",
+        "AlphaBeta-d2": "#f9e79f",
+        "AlphaBeta-d3": "#f0b27a",
+        "AlphaBeta-d4": "#d7bde2",
+    }
+
+    fig, (ax1, ax2, ax3) = plt.subplots(
+        3, 1, figsize=(12, 9), sharex=True,
+        gridspec_kw={"height_ratios": [3, 2, 1]},
+    )
+    fig.suptitle("Courbe d'apprentissage — DQN (CNN 3 canaux)", fontsize=13, fontweight="bold")
+
+    # Bandes de phase
+    legend_phases: List[str] = []
+    i = 0
+    while i < len(phase_list):
+        phase = phase_list[i]
+        j = i
+        while j < len(phase_list) and phase_list[j] == phase:
+            j += 1
+        x0 = ep_list[i] - log_every
+        x1 = ep_list[j - 1]
+        color = PHASE_COLORS.get(phase, "#eeeeee")
+        for ax in (ax1, ax2, ax3):
+            ax.axvspan(x0, x1, alpha=0.25, color=color, zorder=0)
+        if phase not in legend_phases:
+            legend_phases.append(phase)
+        i = j
+
+    # Panneau 1 : win rate
+    ax1.plot(ep_list, wr_list, color="#1a5276", linewidth=1.6, zorder=2)
+    ax1.axhline(0.5, color="#7f8c8d", linestyle="--", linewidth=0.9, alpha=0.7)
+    ax1.set_ylabel("Taux de victoire\n(fenêtre glissante)", fontsize=10)
+    ax1.set_ylim(0.0, 1.05)
+    ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}"))
+    ax1.grid(axis="y", linestyle=":", alpha=0.5, zorder=1)
+    patches = [
+        mpatches.Patch(color=PHASE_COLORS[p], alpha=0.7, label=f"Phase : {p}")
+        for p in legend_phases if p in PHASE_COLORS
+    ]
+    ax1.legend(handles=patches, loc="upper left", fontsize=8, framealpha=0.9)
+
+    # Panneau 2 : loss
+    ax2.plot(ep_list, loss_list, color="#884ea0", linewidth=1.4, zorder=2)
+    ax2.set_ylabel("Perte moyenne\n(Huber)", fontsize=10)
+    ax2.set_ylim(bottom=0.0)
+    ax2.grid(axis="y", linestyle=":", alpha=0.5, zorder=1)
+
+    # Panneau 3 : epsilon
+    ax3.plot(ep_list, eps_list, color="#c0392b", linewidth=1.4, zorder=2)
+    ax3.set_ylabel("ε", fontsize=10)
+    ax3.set_xlabel("Épisode", fontsize=10)
+    ax3.set_ylim(0.0, 1.08)
+    ax3.grid(axis="y", linestyle=":", alpha=0.5, zorder=1)
+
+    plt.tight_layout()
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "dqn_learning_curve.png")
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Courbe d'apprentissage DQN → {out_path}")
     return out_path
 
 
@@ -205,6 +315,7 @@ def plot_tournament(
 def plot_final_eval(
     results: dict,
     out_dir: str = "artifacts",
+    prefix:  str = "",
 ) -> str:
     """
     Graphique en barres horizontales des win rates finaux de l'agent RL
@@ -226,7 +337,8 @@ def plot_final_eval(
     ax.set_xlim(0.0, 1.0)
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0%}"))
     ax.set_xlabel("Taux de victoire (agent RL en Noirs)", fontsize=10)
-    ax.set_title("Évaluation finale — QL vs chaque adversaire", fontsize=11, fontweight="bold")
+    title = f"Évaluation finale — {prefix.rstrip('_').upper() if prefix else 'QL'} vs chaque adversaire"
+    ax.set_title(title, fontsize=11, fontweight="bold")
 
     for bar, val in zip(bars, values):
         ax.text(
@@ -237,7 +349,7 @@ def plot_final_eval(
     ax.grid(axis="x", linestyle=":", alpha=0.5)
     plt.tight_layout()
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "final_eval.png")
+    out_path = os.path.join(out_dir, f"{prefix}final_eval.png")
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Évaluation finale → {out_path}")

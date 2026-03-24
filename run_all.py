@@ -3,16 +3,19 @@ run_all.py — Point d'entrée unique du projet GymnasiumUQACProjet.
 
 Lance dans l'ordre :
   1. Entraînement Q-Learning (12 000 épisodes, curriculum 5 phases)
-  2. Tournoi inter-agents (Random, MCTS, AlphaBeta-d2/d3/d4, QL)
+  2. Entraînement DQN        (5 000 épisodes par défaut, CNN 3 canaux)
+  3. Tournoi inter-agents    (Random, MCTS, AlphaBeta-d2/d3/d4, QL, DQN)
 
 Usage :
-    conda run -n uqac-gymnasium python run_all.py
+    python run_all.py
 
 Options :
-    --skip-train       Ignorer l'entraînement (utile si artifacts/qtable.pkl existe déjà)
+    --skip-train       Ignorer l'entraînement Q-Learning
+    --skip-dqn         Ignorer l'entraînement DQN
     --skip-tournament  Ignorer le tournoi
-    --fresh            Supprimer artifacts/qtable.pkl avant de commencer
+    --fresh            Supprimer artifacts/qtable.pkl et dqn_model.pt avant de commencer
     --tournament-games Nombre de parties par matchup (défaut : 20)
+    --dqn-episodes     Nombre d'épisodes DQN (défaut : 5 000)
 """
 from __future__ import annotations
 
@@ -34,31 +37,48 @@ def step_train() -> None:
     train()
 
 
+def step_train_dqn(n_episodes: int = 5_000) -> None:
+    _separator("Étape 2 — Entraînement DQN (CNN)")
+    from src.experiments.train_dqn import main as train_dqn
+    train_dqn(n_episodes=n_episodes)
+
+
 def step_tournament(n_games: int = 20) -> None:
-    _separator("Étape 2 — Tournoi inter-agents")
+    _separator("Étape 3 — Tournoi inter-agents")
     from src.experiments.tournament import main as tournament_main
     tournament_main(n_games=n_games)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Lance tout le pipeline du projet.")
-    parser.add_argument("--skip-train",      action="store_true", help="Ignorer l'entraînement RL")
+    parser.add_argument("--skip-train",      action="store_true", help="Ignorer l'entraînement Q-Learning")
+    parser.add_argument("--skip-dqn",        action="store_true", help="Ignorer l'entraînement DQN")
     parser.add_argument("--skip-tournament", action="store_true", help="Ignorer le tournoi inter-agents")
-    parser.add_argument("--fresh",           action="store_true", help="Supprimer qtable.pkl avant de commencer")
+    parser.add_argument("--fresh",           action="store_true", help="Supprimer qtable.pkl et dqn_model.pt avant de commencer")
     parser.add_argument("--tournament-games", type=int, default=20, help="Parties par matchup (défaut : 20)")
+    parser.add_argument("--dqn-episodes",    type=int, default=5_000, help="Épisodes DQN (défaut : 5 000)")
     args = parser.parse_args()
 
-    if args.fresh and os.path.exists("artifacts/qtable.pkl"):
-        os.remove("artifacts/qtable.pkl")
-        print("artifacts/qtable.pkl supprimé.")
+    if args.fresh:
+        for path in ("artifacts/qtable.pkl", "artifacts/dqn_model.pt"):
+            if os.path.exists(path):
+                os.remove(path)
+                print(f"{path} supprimé.")
 
     if not args.skip_train:
         step_train()
     else:
-        print("\n[skip] Entraînement ignoré.")
+        print("\n[skip] Entraînement Q-Learning ignoré.")
         if not os.path.exists("artifacts/qtable.pkl"):
             print("ERREUR : artifacts/qtable.pkl introuvable et --skip-train activé.")
             sys.exit(1)
+
+    if not args.skip_dqn:
+        step_train_dqn(n_episodes=args.dqn_episodes)
+    else:
+        print("\n[skip] Entraînement DQN ignoré.")
+        if not os.path.exists("artifacts/dqn_model.pt"):
+            print("  AVERTISSEMENT : dqn_model.pt introuvable — DQN jouera non entraîné dans le tournoi.")
 
     if not args.skip_tournament:
         step_tournament(n_games=args.tournament_games)
