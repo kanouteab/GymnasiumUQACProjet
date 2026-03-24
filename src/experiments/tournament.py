@@ -6,7 +6,8 @@ Agents :
   - Random
   - MCTS (200 simulations)
   - AlphaBeta depth=2, 3, 4
-  - Q-Learning (chargé depuis artifacts/qtable.pkl)
+  - Q-Learning  (chargé depuis artifacts/qtable.pkl)
+  - DQN         (chargé depuis artifacts/dqn_model.pt)
 
 Pour chaque paire (i, j) avec i≠j :
   → n_games parties, agent i joue les Noirs, agent j les Blancs.
@@ -17,8 +18,8 @@ Résultats sauvegardés dans :
   artifacts/tournament.png   — heatmap (via plot_results.py)
 
 Lancement direct :
-    conda run -n uqac-gymnasium python -m src.experiments.tournament
-    conda run -n uqac-gymnasium python -m src.experiments.tournament --n-games 50
+    python -m src.experiments.tournament
+    python -m src.experiments.tournament --n-games 50
 """
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ from src.envs.othello_env import (
     apply_move, get_legal_moves, get_winner, initial_board, is_terminal,
 )
 from src.agents.alphabeta import AlphaBetaAgent
+from src.agents.dqn import DQNAgent
 from src.agents.mcts import MCTSAgent
 from src.agents.qlearning import QLearningAgent
 from src.training.features import action_to_id, id_to_action, state_features
@@ -121,7 +123,7 @@ def _play_n(
 _WORKER_AGENTS: list = []
 
 
-def _init_pool(qtable_path: str, seed: int) -> None:
+def _init_pool(qtable_path: str, dqn_path: str, seed: int) -> None:
     """Initialise les agents une fois par processus worker."""
     global _WORKER_AGENTS
     ql_agent = QLearningAgent(eps=0.0)
@@ -130,6 +132,12 @@ def _init_pool(qtable_path: str, seed: int) -> None:
             data = pickle.load(f)
             ql_agent.Q1 = data["Q1"]
             ql_agent.Q2 = data["Q2"]
+
+    # DQN — chargé sur CPU pour éviter les conflits GPU entre processus workers
+    dqn_agent = DQNAgent(eps=0.0, device="cpu")
+    if os.path.exists(dqn_path):
+        dqn_agent.load(dqn_path)
+
     _WORKER_AGENTS = [
         _RandomAgent(seed=seed),
         MCTSAgent(n_simulations=200, seed=seed),
@@ -137,6 +145,7 @@ def _init_pool(qtable_path: str, seed: int) -> None:
         AlphaBetaAgent(depth=3, use_move_ordering=True),
         AlphaBetaAgent(depth=4, use_move_ordering=True),
         _QLWrapper(ql_agent),
+        dqn_agent,
     ]
 
 
@@ -151,6 +160,7 @@ def _run_matchup(args: tuple) -> tuple:
 
 def run_tournament(
     qtable_path: str = "artifacts/qtable.pkl",
+    dqn_path:    str = "artifacts/dqn_model.pt",
     n_games:     int = 20,
     seed:        int = 0,
 ) -> Tuple[List[List[float]], List[str]]:
@@ -159,7 +169,8 @@ def run_tournament(
     matrix[i][j] = taux de victoire de l'agent i (Noirs) contre l'agent j (Blancs).
     La diagonale vaut 0.5 par convention.
     """
-    names = ["Random", "MCTS-200", "AB-d2", "AB-d3", "AB-d4", "QL"]
+    dqn_label = "DQN" if os.path.exists(dqn_path) else "DQN*"
+    names = ["Random", "MCTS-200", "AB-d2", "AB-d3", "AB-d4", "QL", dqn_label]
     n     = len(names)
     matrix: List[List[float]] = [[0.5] * n for _ in range(n)]
 
@@ -175,7 +186,7 @@ def run_tournament(
     with ProcessPoolExecutor(
         max_workers=n_workers,
         initializer=_init_pool,
-        initargs=(qtable_path, seed),
+        initargs=(qtable_path, dqn_path, seed),
     ) as executor:
         future_map = {executor.submit(_run_matchup, t): t for t in tasks}
         for future in as_completed(future_map):
@@ -211,12 +222,16 @@ def save_csv(
 def main(n_games: int = 20) -> None:
     from src.experiments.plot_results import plot_tournament
 
+    dqn_path = "artifacts/dqn_model.pt"
+
     print("=" * 65)
-    print("  Tournoi inter-agents")
+    print("  Tournoi inter-agents (7 agents : + DQN)")
     print(f"  {n_games} parties par sens de jeu (N vs B)")
+    if not os.path.exists(dqn_path):
+        print("  ATTENTION : dqn_model.pt introuvable — DQN* jouera non entraîné")
     print("=" * 65)
 
-    matrix, names = run_tournament(n_games=n_games)
+    matrix, names = run_tournament(n_games=n_games, dqn_path=dqn_path)
     save_csv(matrix, names)
 
     print()

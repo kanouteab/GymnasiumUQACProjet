@@ -3,3 +3,4 @@ gymnasium
 numba
 pygame
 matplotlib
+torch
