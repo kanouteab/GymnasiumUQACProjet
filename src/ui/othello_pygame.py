@@ -36,38 +36,15 @@ class _RandomAgent:
         return self.rng.choice(legal) if legal else None
 
 
-class _QLv1Agent:
-    """Wraps QLearningAgent v1 avec select_move()."""
+class _QLAgent:
+    """Wraps QLearningAgent avec select_move()."""
     def __init__(self, qtable_path="artifacts/qtable.pkl"):
-        from src.rl.qlearning import QLearningAgent
-        from src.rl.features import state_features, id_to_action, action_to_id
+        from src.agents.qlearning import QLearningAgent
+        from src.training.features import state_features, id_to_action, action_to_id
         self._sf = state_features
         self._ia = id_to_action
         self._ai = action_to_id
         self.agent = QLearningAgent(eps=0.0)
-        if os.path.exists(qtable_path):
-            with open(qtable_path, "rb") as f:
-                self.agent.Q = pickle.load(f)
-
-    def select_move(self, board, player):
-        legal = get_legal_moves(board, player)
-        if not legal:
-            return None
-        s = self._sf(board, player)
-        aids = [self._ai(mv) for mv in legal]
-        a = self.agent.best_action(s, aids)
-        return self._ia(a)
-
-
-class _QLv2Agent:
-    """Wraps QLearningAgentV2 avec select_move()."""
-    def __init__(self, qtable_path="artifacts/qtable_v2.pkl"):
-        from Atelier2.GymnasiumUQACProjet.src.rl.qlearning import QLearningAgentV2
-        from Atelier2.GymnasiumUQACProjet.src.rl.features import state_features_v2, id_to_action, action_to_id
-        self._sf = state_features_v2
-        self._ia = id_to_action
-        self._ai = action_to_id
-        self.agent = QLearningAgentV2(eps=0.0)
         if os.path.exists(qtable_path):
             with open(qtable_path, "rb") as f:
                 data = pickle.load(f)
@@ -92,8 +69,7 @@ AGENT_SPECS = [
     {"label": "Alpha-Beta d=2",   "kind": "ab",   "depth": 2},
     {"label": "Alpha-Beta d=4",   "kind": "ab",   "depth": 4},
     {"label": "MCTS (120 sims)",  "kind": "mcts", "sims": 120},
-    {"label": "Q-Learning v1",    "kind": "ql1",  "path": "artifacts/qtable.pkl"},
-    {"label": "Q-Learning v2",    "kind": "ql2",  "path": "artifacts/qtable_v2.pkl"},
+    {"label": "Q-Learning",    "kind": "ql",  "path": "artifacts/qtable.pkl"},
 ]
 
 
@@ -104,8 +80,7 @@ def make_agent(spec):
     if kind == "ab":      return AlphaBetaAgent(depth=spec["depth"], use_move_ordering=True)
     if kind == "mcts":    return MCTSAgent(n_simulations=spec["sims"], c_uct=1.4,
                                            rollout_max_steps=60, seed=0)
-    if kind == "ql1":     return _QLv1Agent(spec["path"])
-    if kind == "ql2":     return _QLv2Agent(spec["path"])
+    if kind == "ql":     return _QLAgent(spec["path"])
     return None
 
 
@@ -271,7 +246,7 @@ def draw_menu(screen, font, title_font, small, selected, hover_item):
             screen.blit(lbl, (rect.x + 30, rect.centery - lbl.get_height()//2))
 
             # Badge "non entraîné" pour les QL sans fichier
-            if spec["kind"] in ("ql1", "ql2") and not os.path.exists(spec["path"]):
+            if spec["kind"] == "ql" and not os.path.exists(spec["path"]):
                 na = small.render("non entraîné", True, (190, 80, 80))
                 screen.blit(na, (rect.right - na.get_width() - 8,
                                  rect.centery - na.get_height()//2))

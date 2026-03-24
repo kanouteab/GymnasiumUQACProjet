@@ -1,10 +1,10 @@
 # src/experiments/train_rl.py
 """
-Entraînement Q-Learning v2 avec toutes les améliorations.
+Entraînement Q-Learning avec toutes les améliorations.
 
 Améliorations vs train_rl.py v1 :
-  1. État enrichi (score positionnel)  → via state_features_v2()
-  2. Double Q-Learning                 → via QLearningAgentV2
+  1. État enrichi (score positionnel)  → via state_features()
+  2. Double Q-Learning                 → via QLearningAgent
   3. Reward shaping (coins + mobilité) → récompenses intermédiaires non nulles
   4. Self-play (~30 % des épisodes)    → l'agent apprend les deux couleurs
   5. Curriculum learning               → ep 1-2000 vs Random, ep 2001-5000 vs Alpha-Beta depth=2
@@ -17,6 +17,7 @@ Lancement :
 from __future__ import annotations
 
 import pickle
+import csv
 import os
 import random
 from typing import Optional, Tuple, List
@@ -25,10 +26,10 @@ from src.envs.othello_env import (
     initial_board, get_legal_moves, apply_move,
     is_terminal, get_winner,
 )
-from src.rl.features import (
-    state_features_v2, shaped_reward, action_to_id, id_to_action,
+from src.training.features import (
+    state_features, shaped_reward, action_to_id, id_to_action,
 )
-from src.rl.qlearning import QLearningAgentV2
+from src.agents.qlearning import QLearningAgent
 from src.agents.alphabeta import AlphaBetaAgent
 from src.agents.mcts import MCTSAgent
 
@@ -61,7 +62,7 @@ def legal_action_ids(board: Board, player: int) -> List[int]:
 # select_move(board, player) -> Optional[Move].
 
 def play_episode_vs_opp(
-    agent: QLearningAgentV2,
+    agent: QLearningAgent,
     opp,
     seed: int,
     shaped: bool = True,
@@ -80,7 +81,7 @@ def play_episode_vs_opp(
 
         # Tour de l'agent (Noir) 
         board_before = board
-        s = state_features_v2(board, player=1)
+        s = state_features(board, player=1)
         legal_a = legal_action_ids(board, player=1)
         a = agent.select_action(s, legal_a)
         mv = id_to_action(a)
@@ -99,7 +100,7 @@ def play_episode_vs_opp(
             done = is_terminal(board)
 
         # Mise à jour TD
-        s2      = state_features_v2(board, player=1)
+        s2      = state_features(board, player=1)
         legal_a2 = legal_action_ids(board, player=1)
 
         if done:
@@ -122,7 +123,7 @@ def play_episode_vs_random(agent, opp, seed, shaped=True, max_steps=200):
 # Mode 2 : self-play (agent joue les deux couleurs)
 
 def play_episode_selfplay(
-    agent: QLearningAgentV2,
+    agent: QLearningAgent,
     seed: int,
     shaped: bool = True,
     max_steps: int = 200,
@@ -148,7 +149,7 @@ def play_episode_selfplay(
     while not is_terminal(board) and steps < max_steps:
 
         board_before = board
-        s       = state_features_v2(board, player)
+        s       = state_features(board, player)
         legal_a = legal_action_ids(board, player)
         a       = agent.select_action(s, legal_a)
         mv      = id_to_action(a)
@@ -163,7 +164,7 @@ def play_episode_selfplay(
         # (maintenant qu'il vient d'agir, on connaît s' pour lui)
         if deferred[other] is not None:
             s_o, a_o, bb_o = deferred[other]
-            s2_o   = state_features_v2(board, other)
+            s2_o   = state_features(board, other)
             la2_o  = legal_action_ids(board, other)
 
             if done:
@@ -182,7 +183,7 @@ def play_episode_selfplay(
         if done:
             w = get_winner(board)
             r = 1.0 if w == player else (-1.0 if w == -player else 0.0)
-            s2  = state_features_v2(board, player)
+            s2  = state_features(board, player)
             la2 = legal_action_ids(board, player)
             agent.update(s, a, r, s2, la2, done=True)
         else:
@@ -197,7 +198,7 @@ def play_episode_selfplay(
 
 # Évaluation
 
-def evaluate(agent: QLearningAgentV2, opp=None, n_games: int = 200, seed: int = 99999) -> float:
+def evaluate(agent: QLearningAgent, opp=None, n_games: int = 200, seed: int = 99999) -> float:
     """
     Joue n_games parties : agent (Noirs, eps=0) vs opp (Blancs).
     opp par défaut = RandomAgent. Passe un AlphaBetaAgent pour évaluer contre lui.
@@ -214,7 +215,7 @@ def evaluate(agent: QLearningAgentV2, opp=None, n_games: int = 200, seed: int = 
         steps = 0
         while not is_terminal(board) and steps < 200:
             # Agent (Noir)
-            s = state_features_v2(board, 1)
+            s = state_features(board, 1)
             legal_a = legal_action_ids(board, 1)
             a = agent.select_action(s, legal_a)
             mv = id_to_action(a)
@@ -239,7 +240,7 @@ def evaluate(agent: QLearningAgentV2, opp=None, n_games: int = 200, seed: int = 
 # Main
 
 def main() -> None:
-    agent = QLearningAgentV2(
+    agent = QLearningAgent(
         alpha=0.2,
         gamma=0.95,
         eps=1.0,
@@ -273,9 +274,10 @@ def main() -> None:
 
     wins_total = {1: 0, -1: 0, 0: 0}
     recent: List[int] = []
+    stats:  List[dict] = []  # collecte pour la courbe d'apprentissage
 
     print("=" * 65)
-    print("  Q-Learning v2 — Double Q + Reward Shaping + Curriculum + Self-Play")
+    print("  Q-Learning — Double Q + Reward Shaping + Curriculum + Self-Play")
     print(f"  {n_episodes} épisodes | alpha={agent.alpha} gamma={agent.gamma}")
     print(f"  Phase 1 (ep 1-{CURRICULUM_SWITCH_1})              : vs Random")
     print(f"  Phase 2 (ep {CURRICULUM_SWITCH_1+1}-{CURRICULUM_SWITCH_2})           : vs MCTS")
@@ -329,6 +331,7 @@ def main() -> None:
                 f"WinRate last{log_every}={wr:.1%} | "
                 f"États visités={agent.n_visited()}"
             )
+            stats.append({"ep": ep, "phase": phase, "win_rate": round(wr, 4), "eps": round(agent.eps, 4)})
 
         # Annonces des switchs de curriculum
         if ep == CURRICULUM_SWITCH_1:
@@ -350,13 +353,29 @@ def main() -> None:
 
     # Sauvegarde
     os.makedirs("artifacts", exist_ok=True)
-    path = "artifacts/qtable_v2.pkl"
+    path = "artifacts/qtable.pkl"
     with open(path, "wb") as f:
         pickle.dump({"Q1": agent.Q1, "Q2": agent.Q2}, f)
 
     print()
     print(f"Sauvegardé → {path}")
     print(f"  États visités : {agent.n_visited()}")
+
+    # Sauvegarde des stats d'entraînement (courbe d'apprentissage)
+    stats_path = "artifacts/training_stats.csv"
+    with open(stats_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["ep", "phase", "win_rate", "eps"])
+        writer.writeheader()
+        writer.writerows(stats)
+    print(f"  Stats d'entraînement → {stats_path}")
+
+    # Génération automatique de la courbe d'apprentissage
+    try:
+        from src.experiments.plot_results import plot_learning_curve
+        plot_learning_curve(csv_path=stats_path)
+    except Exception as exc:
+        print(f"  [plot] Impossible de générer la courbe : {exc}")
+
     wr_rand_final = evaluate(agent, opp=None,                    n_games=500)
     wr_mcts_final = evaluate(agent, opp=MCTSAgent(n_simulations=200, seed=1), n_games=200)
     wr_ab2_final  = evaluate(agent, opp=AlphaBetaAgent(depth=2), n_games=200)
@@ -367,6 +386,18 @@ def main() -> None:
     print(f"  Win rate final vs AlphaBeta-d2 (200p) : {wr_ab2_final:.1%}")
     print(f"  Win rate final vs AlphaBeta-d3 (200p) : {wr_ab3_final:.1%}")
     print(f"  Win rate final vs AlphaBeta-d4 (200p) : {wr_ab4_final:.1%}")
+
+    try:
+        from src.experiments.plot_results import plot_final_eval
+        plot_final_eval({
+            "vs Random (500p)":       wr_rand_final,
+            "vs MCTS-200 (200p)":     wr_mcts_final,
+            "vs AlphaBeta-d2 (200p)": wr_ab2_final,
+            "vs AlphaBeta-d3 (200p)": wr_ab3_final,
+            "vs AlphaBeta-d4 (200p)": wr_ab4_final,
+        })
+    except Exception as exc:
+        print(f"  [plot] Impossible de générer le graphique final : {exc}")
 
 
 if __name__ == "__main__":

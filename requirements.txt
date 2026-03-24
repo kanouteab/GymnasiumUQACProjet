@@ -2,3 +2,4 @@ numpy
 gymnasium
 numba
 pygame
+matplotlib
