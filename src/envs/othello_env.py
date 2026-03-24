@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -334,8 +335,9 @@ def initial_board() -> Board:
     return (black_bb, white_bb)
 
 
+@lru_cache(maxsize=512)
 def get_legal_moves(board: Board, player: int) -> List[Move]:
-    """Liste de tous les coups légaux (row, col) pour player."""
+    """Liste de tous les coups légaux (row, col) pour player. NE PAS muter la liste retournée."""
     my_bb, opp_bb = _player_boards(board, player)
     legal_bb = _legal_moves_bb(my_bb, opp_bb)  # np.uint64
     moves: List[Move] = []
@@ -365,6 +367,7 @@ def has_any_legal_move(board: Board, player: int) -> bool:
     return _legal_moves_bb(my_bb, opp_bb) != 0
 
 
+@lru_cache(maxsize=512)
 def is_terminal(board: Board) -> bool:
     """
     Terminal si le plateau est plein ou si aucun joueur n'a de coup légal.

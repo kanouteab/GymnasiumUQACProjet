@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import List, Optional, Tuple
 
 from src.envs.othello_env import (
@@ -55,6 +56,7 @@ def _positional_score(my_bb: int, opp_bb: int) -> float:
     return float(pos)
 
 
+@lru_cache(maxsize=4096)
 def evaluate(board: Board, player: int) -> float:
     """
     Heuristique pour Othello du point de vue 'player' (+1 Noir, -1 Blanc).

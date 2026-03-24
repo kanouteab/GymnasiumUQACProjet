@@ -25,10 +25,10 @@ from src.envs.othello_env import (
     initial_board, get_legal_moves, apply_move,
     is_terminal, get_winner,
 )
-from Atelier2.GymnasiumUQACProjet.src.rl.features import (
+from src.rl.features import (
     state_features_v2, shaped_reward, action_to_id, id_to_action,
 )
-from Atelier2.GymnasiumUQACProjet.src.rl.qlearning import QLearningAgentV2
+from src.rl.qlearning import QLearningAgentV2
 from src.agents.alphabeta import AlphaBetaAgent
 from src.agents.mcts import MCTSAgent
 
@@ -327,7 +327,7 @@ def main() -> None:
                 f"Ep {ep:5d} [{phase:12s}] | ε={agent.eps:.4f} | "
                 f"W={wins_total[1]} L={wins_total[-1]} D={wins_total[0]} | "
                 f"WinRate last{log_every}={wr:.1%} | "
-                f"Q1={len(agent.Q1)} Q2={len(agent.Q2)} entrées"
+                f"États visités={agent.n_visited()}"
             )
 
         # Annonces des switchs de curriculum
@@ -356,8 +356,7 @@ def main() -> None:
 
     print()
     print(f"Sauvegardé → {path}")
-    print(f"  Q1 : {len(agent.Q1)} entrées")
-    print(f"  Q2 : {len(agent.Q2)} entrées")
+    print(f"  États visités : {agent.n_visited()}")
     wr_rand_final = evaluate(agent, opp=None,                    n_games=500)
     wr_mcts_final = evaluate(agent, opp=MCTSAgent(n_simulations=200, seed=1), n_games=200)
     wr_ab2_final  = evaluate(agent, opp=AlphaBetaAgent(depth=2), n_games=200)
