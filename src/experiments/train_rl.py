@@ -23,11 +23,11 @@ import random
 from typing import Optional, Tuple, List
 
 from src.envs.othello_env import (
-    initial_board, get_legal_moves, apply_move,
-    is_terminal, get_winner,
+    get_legal_moves, get_winner,
+    encode_action, OthelloEnv,
 )
 from src.training.features import (
-    state_features, shaped_reward, action_to_id, id_to_action,
+    state_features, shaped_reward,
 )
 from src.agents.qlearning import QLearningAgent
 from src.agents.alphabeta import AlphaBetaAgent
@@ -50,13 +50,6 @@ class RandomAgent:
         return self.rng.choice(legal)
 
 
-def legal_action_ids(board: Board, player: int) -> List[int]:
-    legal = get_legal_moves(board, player)
-    if not legal:
-        return [-1]   # PASS
-    return [action_to_id(mv) for mv in legal]
-
-
 # Mode 1 : agent (Noir) vs adversaire quelconque (Blanc)
 # Fonctionne avec RandomAgent, AlphaBetaAgent, ou tout objet ayant
 # select_move(board, player) -> Optional[Move].
@@ -73,46 +66,42 @@ def play_episode_vs_opp(
     Chaque "pas" = 1 coup agent + 1 coup adversaire (groupés en un step TD).
     Récompense intermédiaire via shaped_reward() si shaped=True.
     Fonctionne avec n'importe quel adversaire implémentant select_move().
+    Utilise OthelloEnv (interface Gymnasium) pour la boucle de jeu.
     """
-    board = initial_board()
+    env = OthelloEnv()
+    env.reset()
     steps = 0
 
-    while not is_terminal(board) and steps < max_steps:
+    while not env.done and steps < max_steps:
 
-        # Tour de l'agent (Noir) 
-        board_before = board
-        s = state_features(board, player=1)
-        legal_a = legal_action_ids(board, player=1)
+        # Tour de l'agent (Noir)
+        board_before = env.state.board
+        s = state_features(env.state.board, player=1)
+        legal_a = env.legal_actions()
         a = agent.select_action(s, legal_a)
-        mv = id_to_action(a)
-        if mv is not None:
-            board = apply_move(board, 1, mv)
+        _, _, terminated, _, _ = env.step(a)
         steps += 1
 
-        done = is_terminal(board)
-
-        # Tour de l'adversaire (Blanc), si la partie continue 
-        if not done and steps < max_steps:
-            mv_opp = opp.select_move(board, -1)
-            if mv_opp is not None:
-                board = apply_move(board, -1, mv_opp)
+        # Tour de l'adversaire (Blanc), si la partie continue
+        if not terminated and steps < max_steps:
+            mv_opp = opp.select_move(env.state.board, -1)
+            _, _, terminated, _, _ = env.step(encode_action(mv_opp))
             steps += 1
-            done = is_terminal(board)
 
         # Mise à jour TD
-        s2      = state_features(board, player=1)
-        legal_a2 = legal_action_ids(board, player=1)
+        s2       = state_features(env.state.board, player=1)
+        legal_a2 = env.legal_actions()
 
-        if done:
-            w = get_winner(board)
+        if terminated:
+            w = get_winner(env.state.board)
             r = 1.0 if w == 1 else (-1.0 if w == -1 else 0.0)
             agent.update(s, a, r, s2, legal_a2, done=True)
         else:
-            r = shaped_reward(board_before, board, player=1) if shaped else 0.0
+            r = shaped_reward(board_before, env.state.board, player=1) if shaped else 0.0
             agent.update(s, a, r, s2, legal_a2, done=False)
 
     agent.decay_epsilon()
-    return get_winner(board)
+    return get_winner(env.state.board)
 
 
 # Alias rétrocompatible
@@ -138,62 +127,62 @@ def play_episode_selfplay(
         (l'adversaire n'a pas encore répondu).
       - On stocke (s, a) pour P et on met à jour P lors du prochain
         tour de P (quand l'adversaire vient d'agir → s' est connu).
+    Utilise OthelloEnv (interface Gymnasium) pour la boucle de jeu.
     """
-    board   = initial_board()
-    player  = 1
-    steps   = 0
+    env = OthelloEnv()
+    env.reset()
+    steps = 0
 
     # Pour chaque joueur : (s, a, board_avant_son_coup) en attente d'update
     deferred: dict = {1: None, -1: None}
 
-    while not is_terminal(board) and steps < max_steps:
+    while not env.done and steps < max_steps:
+        player = env.state.player
+        other  = -player
+        board_before = env.state.board
 
-        board_before = board
-        s       = state_features(board, player)
-        legal_a = legal_action_ids(board, player)
+        s       = state_features(env.state.board, player)
+        legal_a = env.legal_actions()
         a       = agent.select_action(s, legal_a)
-        mv      = id_to_action(a)
-        if mv is not None:
-            board = apply_move(board, player, mv)
-        steps  += 1
 
-        done  = is_terminal(board)
-        other = -player
+        _, _, terminated, _, _ = env.step(a)
+        steps += 1
+
+        # Après env.step(a), env.state.player == other (joueur switché)
+        # env.legal_actions() retourne donc les coups légaux pour `other`
 
         # Mettre à jour la transition en attente de l'adversaire
         # (maintenant qu'il vient d'agir, on connaît s' pour lui)
         if deferred[other] is not None:
             s_o, a_o, bb_o = deferred[other]
-            s2_o   = state_features(board, other)
-            la2_o  = legal_action_ids(board, other)
+            s2_o  = state_features(env.state.board, other)
+            la2_o = env.legal_actions()  # env.state.player == other ici
 
-            if done:
-                w   = get_winner(board)
+            if terminated:
+                w   = get_winner(env.state.board)
                 r_o = 1.0 if w == other else (-1.0 if w == -other else 0.0)
             elif shaped:
-                r_o = shaped_reward(bb_o, board, other)
+                r_o = shaped_reward(bb_o, env.state.board, other)
             else:
                 r_o = 0.0
 
-            agent.update(s_o, a_o, r_o, s2_o, la2_o, done=done)
-            if done:
+            agent.update(s_o, a_o, r_o, s2_o, la2_o, done=terminated)
+            if terminated:
                 deferred[other] = None
 
         # Mettre à jour le joueur courant si partie terminée
-        if done:
-            w = get_winner(board)
+        if terminated:
+            w = get_winner(env.state.board)
             r = 1.0 if w == player else (-1.0 if w == -player else 0.0)
-            s2  = state_features(board, player)
-            la2 = legal_action_ids(board, player)
+            s2  = state_features(env.state.board, player)
+            la2 = env.legal_actions()
             agent.update(s, a, r, s2, la2, done=True)
         else:
             # Stocker pour mise à jour différée
             deferred[player] = (s, a, board_before)
 
-        player = other
-
     agent.decay_epsilon()
-    return get_winner(board)
+    return get_winner(env.state.board)
 
 
 # Évaluation
@@ -203,6 +192,7 @@ def evaluate(agent: QLearningAgent, opp=None, n_games: int = 200, seed: int = 99
     Joue n_games parties : agent (Noirs, eps=0) vs opp (Blancs).
     opp par défaut = RandomAgent. Passe un AlphaBetaAgent pour évaluer contre lui.
     Retourne le taux de victoire des Noirs (∈ [0, 1]).
+    Utilise OthelloEnv (interface Gymnasium) pour la boucle de jeu.
     """
     saved_eps = agent.eps
     agent.eps = 0.0  # mode exploitation pur
@@ -211,26 +201,23 @@ def evaluate(agent: QLearningAgent, opp=None, n_games: int = 200, seed: int = 99
     wins = 0
 
     for i in range(n_games):
-        board = initial_board()
+        env = OthelloEnv()
+        env.reset()
         steps = 0
-        while not is_terminal(board) and steps < 200:
-            # Agent (Noir)
-            s = state_features(board, 1)
-            legal_a = legal_action_ids(board, 1)
-            a = agent.select_action(s, legal_a)
-            mv = id_to_action(a)
-            if mv is not None:
-                board = apply_move(board, 1, mv)
-            steps += 1
-            if is_terminal(board):
-                break
-            # Adversaire (Blanc)
-            mv_opp = opp.select_move(board, -1)
-            if mv_opp is not None:
-                board = apply_move(board, -1, mv_opp)
+        while not env.done and steps < 200:
+            if env.state.player == 1:
+                # Agent (Noir)
+                s = state_features(env.state.board, 1)
+                legal_a = env.legal_actions()
+                a = agent.select_action(s, legal_a)
+                env.step(a)
+            else:
+                # Adversaire (Blanc)
+                mv_opp = opp.select_move(env.state.board, -1)
+                env.step(encode_action(mv_opp))
             steps += 1
 
-        if get_winner(board) == 1:
+        if get_winner(env.state.board) == 1:
             wins += 1
 
     agent.eps = saved_eps
