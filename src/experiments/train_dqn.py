@@ -4,12 +4,15 @@ Entraînement DQN pour Othello.
 
 Architecture : CNN 3 canaux (mes pions / pions adverses / coups légaux)
 Device       : CUDA si disponible, sinon CPU
-Curriculum   :
-  Phase 1 (ep    1–1 000) : vs Random         — apprentissage des bases
-  Phase 2 (ep 1 001–2 000) : vs MCTS-200      — stratégie positionnelle
-  Phase 3 (ep 2 001–3 000) : vs AlphaBeta-d2  — vision tactique
-  Phase 4 (ep 3 001–4 000) : vs AlphaBeta-d3  — affinage fort
-  Phase 5 (ep 4 001–5 000) : vs AlphaBeta-d4  — test ultime
+Curriculum adaptatif basé sur le win rate :
+  Phase 1 : vs Random      (seuil 80%, min 2000 ep, max  8000 ep)
+  Phase 2 : vs MCTS-50     (seuil 40%, min 1000 ep, max  5000 ep)
+  Phase 3 : vs MCTS-200    (seuil 25%, min 1500 ep, max  5000 ep)
+  Phase 4 : vs AB-d2       (seuil 20%, min 1000 ep, max  4000 ep)
+  Phase 5 : vs AB-d3       (seuil 15%, min 1000 ep, max  4000 ep)
+  Phase 6 : vs AB-d4       (finale,    min 1000 ep, max jusqu'au 20000 totales)
+Epsilon reseté à chaque changement de phase (injection de curiosité).
+Plafond global de 20 000 épisodes.
 
 Boucle par épisode :
   - L'agent joue toujours les Noirs (+1)
@@ -171,13 +174,13 @@ def evaluate(
 
 # ── Main ────────────────────────────────────────────────────────────────────────
 
-def main(n_episodes: int = 5_000) -> None:
+def main(n_episodes: int = 20_000) -> None:
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("=" * 65)
     print("  DQN — CNN 3 canaux | Replay Buffer | Target Network")
     print(f"  Device : {device.upper()}")
-    print(f"  {n_episodes} épisodes | curriculum 2 phases")
+    print(f"  Max {n_episodes} épisodes | curriculum adaptatif")
     print("=" * 65)
 
     agent = DQNAgent(
@@ -194,44 +197,46 @@ def main(n_episodes: int = 5_000) -> None:
         seed=0,
     )
 
-    PHASE2_START = 1_001   # Random → MCTS
-    PHASE3_START = 2_001   # MCTS → AlphaBeta-d2
-    PHASE4_START = 3_001   # AlphaBeta-d2 → AlphaBeta-d3
-    PHASE5_START = 4_001   # AlphaBeta-d3 → AlphaBeta-d4
+    opp_random  = _RandomAgent(seed=1)
+    opp_mcts50  = MCTSAgent(n_simulations=50,  seed=1)
+    opp_mcts200 = MCTSAgent(n_simulations=200, seed=1)
+    opp_ab2     = AlphaBetaAgent(depth=2)
+    opp_ab3     = AlphaBetaAgent(depth=3)
+    opp_ab4     = AlphaBetaAgent(depth=4)
 
-    opp_random = _RandomAgent(seed=1)
-    opp_mcts   = MCTSAgent(n_simulations=200, seed=1)
-    opp_ab2    = AlphaBetaAgent(depth=2)
-    opp_ab3    = AlphaBetaAgent(depth=3)
-    opp_ab4    = AlphaBetaAgent(depth=4)
+    # Curriculum adaptatif : sortie par win-rate ou plafond de sécurité.
+    #   eps_reset : eps minimum forcé à l'entrée de la phase (None = premier départ)
+    PHASES = [
+        {"name": "Random",       "opp": opp_random,  "win_threshold": 0.80, "min_eps": 2000, "max_eps": 8000, "eps_reset": None},
+        {"name": "MCTS-50",      "opp": opp_mcts50,  "win_threshold": 0.40, "min_eps": 1000, "max_eps": 5000, "eps_reset": 0.60},
+        {"name": "MCTS-200",     "opp": opp_mcts200, "win_threshold": 0.25, "min_eps": 1500, "max_eps": 5000, "eps_reset": 0.50},
+        {"name": "AlphaBeta-d2", "opp": opp_ab2,     "win_threshold": 0.20, "min_eps": 1000, "max_eps": 4000, "eps_reset": 0.40},
+        {"name": "AlphaBeta-d3", "opp": opp_ab3,     "win_threshold": 0.15, "min_eps": 1000, "max_eps": 4000, "eps_reset": 0.30},
+        {"name": "AlphaBeta-d4", "opp": opp_ab4,     "win_threshold": None, "min_eps": 1000, "max_eps": 4000, "eps_reset": 0.20},
+    ]
 
     log_every   = 200
     eval_every  = 500
 
     wins_total  = {1: 0, -1: 0, 0: 0}
-    recent: List[int]   = []
-    stats:  List[dict]  = []
+    recent:        List[int]  = []   # tous épisodes (affichage)
+    recent_vs_opp: List[int]  = []   # hors self-play (critère de sortie) — identique à recent pour DQN
+    stats:         List[dict] = []
 
-    print(f"  Phase 1 (ep     1–{PHASE2_START - 1:4d}) : vs Random")
-    print(f"  Phase 2 (ep {PHASE2_START:5d}–{PHASE3_START - 1:4d}) : vs MCTS-200")
-    print(f"  Phase 3 (ep {PHASE3_START:5d}–{PHASE4_START - 1:4d}) : vs AlphaBeta-d2")
-    print(f"  Phase 4 (ep {PHASE4_START:5d}–{PHASE5_START - 1:4d}) : vs AlphaBeta-d3")
-    print(f"  Phase 5 (ep {PHASE5_START:5d}–{n_episodes:5d}) : vs AlphaBeta-d4")
+    current_phase = 0
+    phase_ep      = 0
+
+    for i, ph in enumerate(PHASES):
+        thr = f"{ph['win_threshold']:.0%}" if ph['win_threshold'] is not None else "—"
+        mx  = str(ph['max_eps']) if ph['max_eps'] is not None else "total"
+        print(f"  Phase {i+1}: {ph['name']:12s} | seuil={thr:4s} | min={ph['min_eps']:4d} | max={mx:>5}")
     print("=" * 65)
 
     t0 = time.time()
 
-    for ep in range(1, n_episodes + 1):
-        if ep < PHASE2_START:
-            opp, phase = opp_random, "Random"
-        elif ep < PHASE3_START:
-            opp, phase = opp_mcts, "MCTS"
-        elif ep < PHASE4_START:
-            opp, phase = opp_ab2, "AlphaBeta-d2"
-        elif ep < PHASE5_START:
-            opp, phase = opp_ab3, "AlphaBeta-d3"
-        else:
-            opp, phase = opp_ab4, "AlphaBeta-d4"
+    for ep_total in range(1, n_episodes + 1):
+        ph  = PHASES[current_phase]
+        opp = ph["opp"]
 
         w, avg_loss = play_episode(agent, opp, shaped=True)
 
@@ -240,47 +245,71 @@ def main(n_episodes: int = 5_000) -> None:
         if len(recent) > log_every:
             recent.pop(0)
 
-        if ep % log_every == 0:
-            wr = recent.count(1) / len(recent)
+        # DQN : pas de self-play → recent_vs_opp == recent
+        recent_vs_opp.append(w)
+        if len(recent_vs_opp) > log_every:
+            recent_vs_opp.pop(0)
+
+        phase_ep += 1
+
+        # ── Critère de sortie de phase ──────────────────────────────────────
+        if current_phase < len(PHASES) - 1:
+            wr_opp  = recent_vs_opp.count(1) / len(recent_vs_opp) if recent_vs_opp else 0.0
+            win_thr = ph["win_threshold"]
+            max_ep  = ph["max_eps"]
+            min_ep  = ph["min_eps"]
+
+            crit_wr = (
+                phase_ep >= min_ep
+                and len(recent_vs_opp) >= log_every
+                and win_thr is not None
+                and wr_opp >= win_thr
+            )
+            crit_cap = (max_ep is not None and phase_ep >= max_ep)
+
+            if crit_wr or crit_cap:
+                reason = "win-rate" if crit_wr else "plafond"
+                current_phase += 1
+                phase_ep       = 0
+                recent_vs_opp  = []
+                next_ph        = PHASES[current_phase]
+                if next_ph["eps_reset"] is not None:
+                    agent.eps = max(agent.eps, next_ph["eps_reset"])
+                print()
+                print(
+                    f"  *** Phase {current_phase + 1} : adversaire → {next_ph['name']} "
+                    f"(raison : {reason}, ε→{agent.eps:.2f}) ***"
+                )
+                print()
+
+        # ── Log périodique ────────────────────────────────────────────────
+        if ep_total % log_every == 0:
+            wr     = recent.count(1) / len(recent)
+            wr_opp = recent_vs_opp.count(1) / len(recent_vs_opp) if recent_vs_opp else 0.0
+            phase_name = PHASES[current_phase]["name"]
             elapsed = time.time() - t0
-            em, es = divmod(int(elapsed), 60)
+            em, es  = divmod(int(elapsed), 60)
             print(
-                f"Ep {ep:5d} [{phase:8s}] | ε={agent.eps:.4f}"
+                f"Ep {ep_total:5d} [{phase_name:12s}] | ε={agent.eps:.4f}"
                 f" | W={wins_total[1]} L={wins_total[-1]} D={wins_total[0]}"
-                f" | WR last{log_every}={wr:.1%}"
+                f" | WR(all)={wr:.1%} WR(vs-opp)={wr_opp:.1%}"
                 f" | loss={avg_loss:.4f}"
                 f" | buf={len(agent.buffer)}"
                 f" | +{em}m{es:02d}s"
             )
             stats.append({
-                "ep":       ep,
-                "phase":    phase,
-                "win_rate": round(wr, 4),
-                "eps":      round(agent.eps, 4),
-                "avg_loss": round(avg_loss, 6),
+                "ep":        ep_total,
+                "phase":     phase_name,
+                "win_rate":  round(wr, 4),
+                "wr_vs_opp": round(wr_opp, 4),
+                "eps":       round(agent.eps, 4),
+                "avg_loss":  round(avg_loss, 6),
             })
 
-        if ep == PHASE2_START - 1:
-            print()
-            print("  *** Phase 2 : adversaire → MCTS-200 ***")
-            print()
-        elif ep == PHASE3_START - 1:
-            print()
-            print("  *** Phase 3 : adversaire → AlphaBeta-d2 ***")
-            print()
-        elif ep == PHASE4_START - 1:
-            print()
-            print("  *** Phase 4 : adversaire → AlphaBeta-d3 ***")
-            print()
-        elif ep == PHASE5_START - 1:
-            print()
-            print("  *** Phase 5 : adversaire → AlphaBeta-d4 ***")
-            print()
-
         # Évaluation périodique
-        if ep % eval_every == 0:
+        if ep_total % eval_every == 0:
             wr_rand = evaluate(agent, _RandomAgent(seed=99), n_games=100)
-            print(f"         [éval ep {ep}] vs Random={wr_rand:.1%}")
+            print(f"         [éval ep {ep_total}] vs Random={wr_rand:.1%}")
 
     # ── Sauvegarde ──────────────────────────────────────────────────────────
     os.makedirs("artifacts", exist_ok=True)
@@ -294,7 +323,7 @@ def main(n_episodes: int = 5_000) -> None:
     stats_path = "artifacts/dqn_training_stats.csv"
     with open(stats_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
-            f, fieldnames=["ep", "phase", "win_rate", "eps", "avg_loss"]
+            f, fieldnames=["ep", "phase", "win_rate", "wr_vs_opp", "eps", "avg_loss"]
         )
         writer.writeheader()
         writer.writerows(stats)
@@ -344,7 +373,7 @@ def main(n_episodes: int = 5_000) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--episodes", type=int, default=5_000,
-                        help="Nombre d'épisodes (défaut : 5 000)")
+    parser.add_argument("--episodes", type=int, default=20_000,
+                        help="Nombre d'épisodes (défaut : 20 000)")
     args = parser.parse_args()
     main(n_episodes=args.episodes)

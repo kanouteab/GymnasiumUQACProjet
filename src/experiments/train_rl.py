@@ -2,14 +2,20 @@
 """
 Entraînement Q-Learning avec toutes les améliorations.
 
-Améliorations vs train_rl.py v1 :
+Améliorations vs v1 :
   1. État enrichi (score positionnel)  → via state_features()
   2. Double Q-Learning                 → via QLearningAgent
   3. Reward shaping (coins + mobilité) → récompenses intermédiaires non nulles
-  4. Self-play (~30 % des épisodes)    → l'agent apprend les deux couleurs
-  5. Curriculum learning               → ep 1-2000 vs Random, ep 2001-5000 vs Alpha-Beta depth=2
-  6. 5 000 épisodes (vs 2 000 en v1)  → plus de données d'entraînement
-  7. Évaluation périodique vs Random ET vs Alpha-Beta
+  4. Self-play (0% Phase 1, ~30% phases avancées)
+  5. Curriculum adaptatif basé sur le win rate :
+       Phase 1 : vs Random   (seuil 80%, min 2000 ep, max 8000 ep)
+       Phase 2 : vs MCTS-50  (seuil 40%, min 1000 ep, max 5000 ep)
+       Phase 3 : vs MCTS-200 (seuil 25%, min 1500 ep, max 5000 ep)
+       Phase 4 : vs AB-d2    (seuil 20%, min 1000 ep, max 4000 ep)
+       Phase 5 : vs AB-d3    (seuil 15%, min 1000 ep, max 4000 ep)
+       Phase 6 : vs AB-d4    (finale,    min 1000 ep, max jusqu'au 20000 totales)
+  6. Epsilon reseté à chaque changement de phase (injection de curiosité)
+  7. Plafond global de 20 000 épisodes
 
 Lancement :
     python -m src.experiments.train_rl
@@ -232,119 +238,131 @@ def main() -> None:
         alpha=0.2,
         gamma=0.95,
         eps=1.0,
-        eps_decay=0.9993,   # atteint eps_min ≈ 0.05 après ~1 000 épisodes
+        eps_decay=0.9993,
         eps_min=0.05,
         seed=0,
     )
-    """
-    Phases d'entraînement :
-    Phase 1 (ep 1-2000)    : Random             → l'agent apprend les bases
-    Phase 2 (ep 2001-5000) : MCTS               → adversaire stratégique intermédiaire
-    Phase 3 (ep 5001-8000) : Alpha-Beta d2      → adversaire stratégique intermédiaire
-    Phase 4 (ep 8001-10000) : Alpha-Beta d3     → adversaire fort, affinage fin
-    Phase 5 (ep 10001-12000) : Alpha-Beta d4    → adversaire très fort, test ultime
-    depth=2 : assez fort pour enseigner mais pas écrasant (~30-40% win rate attendu)
-    depth=3 : fort, l'agent doit être déjà bien entraîné pour espérer rivaliser (~15-30% win rate attendu)
-    depth=4 : adversaire sérieux, l'agent ne gagnera que ~10-20%, mais même ce rare signal positif est très informatif.
-    """
-    opp_random = RandomAgent(seed=1)
-    opp_mcts   = MCTSAgent(n_simulations=200, seed=1)
-    opp_ab2    = AlphaBetaAgent(depth=2, use_move_ordering=True)
-    opp_ab3    = AlphaBetaAgent(depth=3, use_move_ordering=True)
-    opp_ab4    = AlphaBetaAgent(depth=4, use_move_ordering=True)
-    CURRICULUM_SWITCH_1 = 2000    # Random → MCTS
-    CURRICULUM_SWITCH_2 = 5000    # MCTS → Alpha-Beta d2
-    CURRICULUM_SWITCH_3 = 8000    # Alpha-Beta d2 → Alpha-Beta d3
-    CURRICULUM_SWITCH_4 = 10000   # Alpha-Beta d3 → Alpha-Beta d4
 
-    n_episodes   = 12000
-    log_every    = 200   # log compact toutes les N épisodes
+    opp_random  = RandomAgent(seed=1)
+    opp_mcts50  = MCTSAgent(n_simulations=50,  seed=1)
+    opp_mcts200 = MCTSAgent(n_simulations=200, seed=1)
+    opp_ab2     = AlphaBetaAgent(depth=2, use_move_ordering=True)
+    opp_ab3     = AlphaBetaAgent(depth=3, use_move_ordering=True)
+    opp_ab4     = AlphaBetaAgent(depth=4, use_move_ordering=True)
+
+    # Curriculum adaptatif : sortie par win-rate ou plafond de sécurité.
+    #   selfplay  : fraction d'épisodes joués en self-play (0 = aucun)
+    #   eps_reset : eps minimum forcé à l'entrée de la phase (None = premier départ)
+    PHASES = [
+        {"name": "Random",       "opp": opp_random,  "win_threshold": 0.80, "min_eps": 2000, "max_eps": 8000, "selfplay": 0.0,  "eps_reset": None},
+        {"name": "MCTS-50",      "opp": opp_mcts50,  "win_threshold": 0.40, "min_eps": 1000, "max_eps": 5000, "selfplay": 0.30, "eps_reset": 0.60},
+        {"name": "MCTS-200",     "opp": opp_mcts200, "win_threshold": 0.25, "min_eps": 1500, "max_eps": 5000, "selfplay": 0.30, "eps_reset": 0.50},
+        {"name": "AlphaBeta-d2", "opp": opp_ab2,     "win_threshold": 0.20, "min_eps": 1000, "max_eps": 4000, "selfplay": 0.30, "eps_reset": 0.40},
+        {"name": "AlphaBeta-d3", "opp": opp_ab3,     "win_threshold": 0.15, "min_eps": 1000, "max_eps": 4000, "selfplay": 0.30, "eps_reset": 0.30},
+        {"name": "AlphaBeta-d4", "opp": opp_ab4,     "win_threshold": None, "min_eps": 1000, "max_eps": None, "selfplay": 0.30, "eps_reset": 0.20},
+    ]
+
+    TOTAL_EPISODES = 50_000
+    log_every      = 200   # log compact toutes les N épisodes
 
     wins_total = {1: 0, -1: 0, 0: 0}
-    recent: List[int] = []
-    stats:  List[dict] = []  # collecte pour la courbe d'apprentissage
+    recent:        List[int] = []   # tous épisodes (affichage)
+    recent_vs_opp: List[int] = []   # hors self-play (critère de sortie, signal non pollué)
+    stats:         List[dict] = []
+
+    current_phase = 0
+    phase_ep      = 0   # épisodes joués dans la phase courante
 
     print("=" * 65)
-    print("  Q-Learning — Double Q + Reward Shaping + Curriculum + Self-Play")
-    print(f"  {n_episodes} épisodes | alpha={agent.alpha} gamma={agent.gamma}")
-    print(f"  Phase 1 (ep 1-{CURRICULUM_SWITCH_1})              : vs Random")
-    print(f"  Phase 2 (ep {CURRICULUM_SWITCH_1+1}-{CURRICULUM_SWITCH_2})           : vs MCTS")
-    print(f"  Phase 3 (ep {CURRICULUM_SWITCH_2+1}-{CURRICULUM_SWITCH_3})          : vs Alpha-Beta depth=2")
-    print(f"  Phase 4 (ep {CURRICULUM_SWITCH_3+1}-{CURRICULUM_SWITCH_4})        : vs Alpha-Beta depth=3")
-    print(f"  Phase 5 (ep {CURRICULUM_SWITCH_4+1}-{n_episodes})        : vs Alpha-Beta depth=4")
+    print("  Q-Learning — Double Q + Reward Shaping + Curriculum adaptatif + Self-Play")
+    print(f"  Max {TOTAL_EPISODES} épisodes | alpha={agent.alpha} gamma={agent.gamma}")
+    for i, ph in enumerate(PHASES):
+        thr = f"{ph['win_threshold']:.0%}" if ph['win_threshold'] is not None else "—"
+        sp  = f"{int(ph['selfplay'] * 100)}%"
+        mx  = str(ph['max_eps']) if ph['max_eps'] is not None else "total"
+        print(f"  Phase {i+1}: {ph['name']:12s} | seuil={thr:4s} | min={ph['min_eps']:4d} | max={mx:>5} | selfplay={sp}")
     print("=" * 65)
 
     t0 = time.time()
 
-    for ep in range(1, n_episodes + 1):
+    for ep_total in range(1, TOTAL_EPISODES + 1):
+        ph      = PHASES[current_phase]
+        opp     = ph["opp"]
+        sp_frac = ph["selfplay"]
 
-        # Choix de l'adversaire selon la phase du curriculum
-        if ep <= CURRICULUM_SWITCH_1:
-            opp = opp_random
-        elif ep <= CURRICULUM_SWITCH_2:
-            opp = opp_mcts
-        elif ep <= CURRICULUM_SWITCH_3:
-            opp = opp_ab2
-        elif ep <= CURRICULUM_SWITCH_4:
-            opp = opp_ab3
-        else:
-            opp = opp_ab4
-
-        # 30 % self-play, 70 % vs adversaire courant
-        use_selfplay = (ep % 10) < 3
+        # 0% self-play en phase 1, 30% en phases suivantes
+        use_selfplay = (sp_frac > 0.0) and ((ep_total % 10) < int(sp_frac * 10))
 
         if use_selfplay:
-            w = play_episode_selfplay(agent, seed=ep, shaped=True)
+            w = play_episode_selfplay(agent, seed=ep_total, shaped=True)
         else:
-            w = play_episode_vs_opp(agent, opp, seed=ep, shaped=True)
+            w = play_episode_vs_opp(agent, opp, seed=ep_total, shaped=True)
 
         wins_total[w] += 1
         recent.append(w)
         if len(recent) > log_every:
             recent.pop(0)
 
-        if ep % log_every == 0:
-            wr    = recent.count(1) / len(recent)
-            if ep <= CURRICULUM_SWITCH_1:
-                phase = "Random"
-            elif ep <= CURRICULUM_SWITCH_2:
-                phase = "MCTS"
-            elif ep <= CURRICULUM_SWITCH_3:
-                phase = "AlphaBeta-d2"
-            elif ep <= CURRICULUM_SWITCH_4:
-                phase = "AlphaBeta-d3"
-            else:
-                phase = "AlphaBeta-d4"
+        if not use_selfplay:
+            recent_vs_opp.append(w)
+            if len(recent_vs_opp) > log_every:
+                recent_vs_opp.pop(0)
+
+        phase_ep += 1
+
+        # ── Critère de sortie de phase ──────────────────────────────────────
+        if current_phase < len(PHASES) - 1:
+            wr_opp  = recent_vs_opp.count(1) / len(recent_vs_opp) if recent_vs_opp else 0.0
+            win_thr = ph["win_threshold"]
+            max_ep  = ph["max_eps"]
+            min_ep  = ph["min_eps"]
+
+            crit_wr = (
+                phase_ep >= min_ep
+                and len(recent_vs_opp) >= log_every
+                and win_thr is not None
+                and wr_opp >= win_thr
+            )
+            crit_cap = (max_ep is not None and phase_ep >= max_ep)
+
+            if crit_wr or crit_cap:
+                reason = "win-rate" if crit_wr else "plafond"
+                current_phase += 1
+                phase_ep       = 0
+                recent_vs_opp  = []
+                next_ph        = PHASES[current_phase]
+                if next_ph["eps_reset"] is not None:
+                    agent.eps = max(agent.eps, next_ph["eps_reset"])
+                print()
+                print(
+                    f"  *** Phase {current_phase + 1} : adversaire → {next_ph['name']} "
+                    f"(raison : {reason}, ε→{agent.eps:.2f}) ***"
+                )
+                print()
+
+        # ── Log périodique ───────────────────────────────────────────────────
+        if ep_total % log_every == 0:
+            wr     = recent.count(1) / len(recent)
+            wr_opp = recent_vs_opp.count(1) / len(recent_vs_opp) if recent_vs_opp else 0.0
+            phase_name = PHASES[current_phase]["name"]
             elapsed = time.time() - t0
-            em, es = divmod(int(elapsed), 60)
+            em, es  = divmod(int(elapsed), 60)
             print(
-                f"Ep {ep:5d} [{phase:12s}] | ε={agent.eps:.4f} | "
+                f"Ep {ep_total:5d} [{phase_name:12s}] | ε={agent.eps:.4f} | "
                 f"W={wins_total[1]} L={wins_total[-1]} D={wins_total[0]} | "
-                f"WinRate last{log_every}={wr:.1%} | "
-                f"États visités={agent.n_visited()} | "
+                f"WR(all)={wr:.1%} WR(vs-opp)={wr_opp:.1%} | "
+                f"États={agent.n_visited()} | "
                 f"+{em}m{es:02d}s"
             )
-            stats.append({"ep": ep, "phase": phase, "win_rate": round(wr, 4), "eps": round(agent.eps, 4)})
+            stats.append({
+                "ep":        ep_total,
+                "phase":     phase_name,
+                "win_rate":  round(wr, 4),
+                "wr_vs_opp": round(wr_opp, 4),
+                "eps":       round(agent.eps, 4),
+            })
 
-        # Annonces des switchs de curriculum
-        if ep == CURRICULUM_SWITCH_1:
-            print()
-            print(f"  *** Phase 2 : adversaire → MCTS ***")
-            print()
-        if ep == CURRICULUM_SWITCH_2:
-            print()
-            print(f"  *** Phase 3 : adversaire → Alpha-Beta depth=2 ***")
-            print()
-        if ep == CURRICULUM_SWITCH_3:
-            print()
-            print(f"  *** Phase 4 : adversaire → Alpha-Beta depth=3 ***")
-            print()
-        if ep == CURRICULUM_SWITCH_4:
-            print()
-            print(f"  *** Phase 5 : adversaire → Alpha-Beta depth=4 ***")
-            print()
-
-    # Sauvegarde
+    # ── Sauvegarde ───────────────────────────────────────────────────────────
     os.makedirs("artifacts", exist_ok=True)
     path = "artifacts/qtable.pkl"
     with open(path, "wb") as f:
@@ -354,28 +372,26 @@ def main() -> None:
     print(f"Sauvegardé → {path}")
     print(f"  États visités : {agent.n_visited()}")
 
-    # Sauvegarde des stats d'entraînement (courbe d'apprentissage)
     stats_path = "artifacts/training_stats.csv"
     with open(stats_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["ep", "phase", "win_rate", "eps"])
+        writer = csv.DictWriter(f, fieldnames=["ep", "phase", "win_rate", "wr_vs_opp", "eps"])
         writer.writeheader()
         writer.writerows(stats)
     print(f"  Stats d'entraînement → {stats_path}")
 
-    # Génération automatique de la courbe d'apprentissage
     try:
         from src.experiments.plot_results import plot_learning_curve
         plot_learning_curve(csv_path=stats_path)
     except Exception as exc:
         print(f"  [plot] Impossible de générer la courbe : {exc}")
 
-    wr_rand_final = evaluate(agent, opp=None,                    n_games=500)
+    wr_rand_final = evaluate(agent, opp=None,                                  n_games=500)
     wr_mcts_final = evaluate(agent, opp=MCTSAgent(n_simulations=200, seed=1), n_games=200)
-    wr_ab2_final  = evaluate(agent, opp=AlphaBetaAgent(depth=2), n_games=200)
-    wr_ab3_final  = evaluate(agent, opp=AlphaBetaAgent(depth=3), n_games=200)
-    wr_ab4_final  = evaluate(agent, opp=AlphaBetaAgent(depth=4), n_games=200)
+    wr_ab2_final  = evaluate(agent, opp=AlphaBetaAgent(depth=2),              n_games=200)
+    wr_ab3_final  = evaluate(agent, opp=AlphaBetaAgent(depth=3),              n_games=200)
+    wr_ab4_final  = evaluate(agent, opp=AlphaBetaAgent(depth=4),              n_games=200)
     print(f"  Win rate final vs Random (500p)       : {wr_rand_final:.1%}")
-    print(f"  Win rate final vs MCTS (200p)         : {wr_mcts_final:.1%}")
+    print(f"  Win rate final vs MCTS-200 (200p)     : {wr_mcts_final:.1%}")
     print(f"  Win rate final vs AlphaBeta-d2 (200p) : {wr_ab2_final:.1%}")
     print(f"  Win rate final vs AlphaBeta-d3 (200p) : {wr_ab3_final:.1%}")
     print(f"  Win rate final vs AlphaBeta-d4 (200p) : {wr_ab4_final:.1%}")
