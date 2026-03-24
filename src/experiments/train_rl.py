@@ -30,6 +30,7 @@ from Atelier2.GymnasiumUQACProjet.src.rl.features import (
 )
 from Atelier2.GymnasiumUQACProjet.src.rl.qlearning import QLearningAgentV2
 from src.agents.alphabeta import AlphaBetaAgent
+from src.agents.mcts import MCTSAgent
 
 Move  = Tuple[int, int]
 Board = Tuple[int, int]
@@ -258,13 +259,16 @@ def main() -> None:
     depth=4 : adversaire sérieux, l'agent ne gagnera que ~10-20%, mais même ce rare signal positif est très informatif.
     """
     opp_random = RandomAgent(seed=1)
+    opp_mcts   = MCTSAgent(n_simulations=200, seed=1)
     opp_ab2    = AlphaBetaAgent(depth=2, use_move_ordering=True)
+    opp_ab3    = AlphaBetaAgent(depth=3, use_move_ordering=True)
     opp_ab4    = AlphaBetaAgent(depth=4, use_move_ordering=True)
-    CURRICULUM_SWITCH_1 = 2000   # Random → Alpha-Beta d2
-    CURRICULUM_SWITCH_2 = 5000   # Alpha-Beta d2 → Alpha-Beta d4
+    CURRICULUM_SWITCH_1 = 2000    # Random → MCTS
+    CURRICULUM_SWITCH_2 = 5000    # MCTS → Alpha-Beta d2
+    CURRICULUM_SWITCH_3 = 8000    # Alpha-Beta d2 → Alpha-Beta d3
+    CURRICULUM_SWITCH_4 = 10000   # Alpha-Beta d3 → Alpha-Beta d4
 
-    n_episodes   = 8000
-    eval_every   = 500   # évaluation intermédiaire toutes les N épisodes
+    n_episodes   = 12000
     log_every    = 200   # log compact toutes les N épisodes
 
     wins_total = {1: 0, -1: 0, 0: 0}
@@ -273,9 +277,11 @@ def main() -> None:
     print("=" * 65)
     print("  Q-Learning v2 — Double Q + Reward Shaping + Curriculum + Self-Play")
     print(f"  {n_episodes} épisodes | alpha={agent.alpha} gamma={agent.gamma}")
-    print(f"  Phase 1 (ep 1-{CURRICULUM_SWITCH_1})                : vs Random")
-    print(f"  Phase 2 (ep {CURRICULUM_SWITCH_1+1}-{CURRICULUM_SWITCH_2})             : vs Alpha-Beta depth=2")
-    print(f"  Phase 3 (ep {CURRICULUM_SWITCH_2+1}-{n_episodes})             : vs Alpha-Beta depth=4")
+    print(f"  Phase 1 (ep 1-{CURRICULUM_SWITCH_1})              : vs Random")
+    print(f"  Phase 2 (ep {CURRICULUM_SWITCH_1+1}-{CURRICULUM_SWITCH_2})           : vs MCTS")
+    print(f"  Phase 3 (ep {CURRICULUM_SWITCH_2+1}-{CURRICULUM_SWITCH_3})          : vs Alpha-Beta depth=2")
+    print(f"  Phase 4 (ep {CURRICULUM_SWITCH_3+1}-{CURRICULUM_SWITCH_4})        : vs Alpha-Beta depth=3")
+    print(f"  Phase 5 (ep {CURRICULUM_SWITCH_4+1}-{n_episodes})        : vs Alpha-Beta depth=4")
     print("=" * 65)
 
     for ep in range(1, n_episodes + 1):
@@ -284,7 +290,11 @@ def main() -> None:
         if ep <= CURRICULUM_SWITCH_1:
             opp = opp_random
         elif ep <= CURRICULUM_SWITCH_2:
+            opp = opp_mcts
+        elif ep <= CURRICULUM_SWITCH_3:
             opp = opp_ab2
+        elif ep <= CURRICULUM_SWITCH_4:
+            opp = opp_ab3
         else:
             opp = opp_ab4
 
@@ -306,7 +316,11 @@ def main() -> None:
             if ep <= CURRICULUM_SWITCH_1:
                 phase = "Random"
             elif ep <= CURRICULUM_SWITCH_2:
+                phase = "MCTS"
+            elif ep <= CURRICULUM_SWITCH_3:
                 phase = "AlphaBeta-d2"
+            elif ep <= CURRICULUM_SWITCH_4:
+                phase = "AlphaBeta-d3"
             else:
                 phase = "AlphaBeta-d4"
             print(
@@ -316,28 +330,25 @@ def main() -> None:
                 f"Q1={len(agent.Q1)} Q2={len(agent.Q2)} entrées"
             )
 
-        if ep % eval_every == 0:
-            wr_rand = evaluate(agent, opp=None, n_games=200)
-            wr_ab2  = evaluate(agent, opp=AlphaBetaAgent(depth=2), n_games=100)
-            wr_ab4  = evaluate(agent, opp=AlphaBetaAgent(depth=4), n_games=100)
-            print(
-                f"  >> Éval ep {ep} : "
-                f"{wr_rand:.1%} vs Random (200p) | "
-                f"{wr_ab2:.1%} vs AB-d2 (100p) | "
-                f"{wr_ab4:.1%} vs AB-d4 (100p)"
-            )
-
         # Annonces des switchs de curriculum
         if ep == CURRICULUM_SWITCH_1:
             print()
-            print(f"  *** Phase 2 : adversaire → Alpha-Beta depth=2 ***")
+            print(f"  *** Phase 2 : adversaire → MCTS ***")
             print()
         if ep == CURRICULUM_SWITCH_2:
             print()
-            print(f"  *** Phase 3 : adversaire → Alpha-Beta depth=4 ***")
+            print(f"  *** Phase 3 : adversaire → Alpha-Beta depth=2 ***")
+            print()
+        if ep == CURRICULUM_SWITCH_3:
+            print()
+            print(f"  *** Phase 4 : adversaire → Alpha-Beta depth=3 ***")
+            print()
+        if ep == CURRICULUM_SWITCH_4:
+            print()
+            print(f"  *** Phase 5 : adversaire → Alpha-Beta depth=4 ***")
             print()
 
-    # ── Sauvegarde ─────────────────────────────────────────────────────────────
+    # Sauvegarde
     os.makedirs("artifacts", exist_ok=True)
     path = "artifacts/qtable_v2.pkl"
     with open(path, "wb") as f:
@@ -348,10 +359,14 @@ def main() -> None:
     print(f"  Q1 : {len(agent.Q1)} entrées")
     print(f"  Q2 : {len(agent.Q2)} entrées")
     wr_rand_final = evaluate(agent, opp=None,                    n_games=500)
+    wr_mcts_final = evaluate(agent, opp=MCTSAgent(n_simulations=200, seed=1), n_games=200)
     wr_ab2_final  = evaluate(agent, opp=AlphaBetaAgent(depth=2), n_games=200)
+    wr_ab3_final  = evaluate(agent, opp=AlphaBetaAgent(depth=3), n_games=200)
     wr_ab4_final  = evaluate(agent, opp=AlphaBetaAgent(depth=4), n_games=200)
     print(f"  Win rate final vs Random (500p)       : {wr_rand_final:.1%}")
+    print(f"  Win rate final vs MCTS (200p)         : {wr_mcts_final:.1%}")
     print(f"  Win rate final vs AlphaBeta-d2 (200p) : {wr_ab2_final:.1%}")
+    print(f"  Win rate final vs AlphaBeta-d3 (200p) : {wr_ab3_final:.1%}")
     print(f"  Win rate final vs AlphaBeta-d4 (200p) : {wr_ab4_final:.1%}")
 
 
