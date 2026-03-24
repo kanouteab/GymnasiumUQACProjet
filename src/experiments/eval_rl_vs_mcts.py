@@ -61,25 +61,25 @@ def play_game(agent_black, agent_white):
 
     return get_winner(board), score(board)
 
+if __name__ == "__main__":
+    # Charger la Q-table entraînée
+    agent_rl = QLearningAgent(eps=0.0)
+    with open("artifacts/qtable.pkl", "rb") as f:
+        agent_rl.Q = pickle.load(f)
 
-# Charger la Q-table entraînée
-agent_rl = QLearningAgent(eps=0.0)
-with open("artifacts/qtable.pkl", "rb") as f:
-    agent_rl.Q = pickle.load(f)
+    # Agent MCTS
+    agent_mcts = MCTSAgent(n_simulations=200)
 
-# Agent MCTS
-agent_mcts = MCTSAgent(n_simulations=200)
+    wins = {1: 0, -1: 0, 0: 0}
+    games = 50
 
-wins = {1: 0, -1: 0, 0: 0}
-games = 50
+    for _ in range(games):
+        winner, _ = play_game(agent_rl, agent_mcts)
+        wins[winner] += 1
 
-for _ in range(games):
-    winner, _ = play_game(agent_rl, agent_mcts)
-    wins[winner] += 1
+    print("RL (Black) vs MCTS (White)")
+    print("Games:", games)
+    print("RL wins:", wins[1])
+    print("MCTS wins:", wins[-1])
 
-print("RL (Black) vs MCTS (White)")
-print("Games:", games)
-print("RL wins:", wins[1])
-print("MCTS wins:", wins[-1])
-
-print("Draw:", wins[0])
+    print("Draw:", wins[0])
