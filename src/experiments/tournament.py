@@ -27,6 +27,7 @@ import csv
 import os
 import pickle
 import random
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import List, Optional, Tuple
 
 from src.envs.othello_env import (
@@ -114,6 +115,38 @@ def _play_n(
     return wb, ww, d
 
 
+# ── Worker pour le tournoi parallèle ─────────────────────────────────────────
+
+# Agents créés une fois par processus worker (via _init_pool)
+_WORKER_AGENTS: list = []
+
+
+def _init_pool(qtable_path: str, seed: int) -> None:
+    """Initialise les agents une fois par processus worker."""
+    global _WORKER_AGENTS
+    ql_agent = QLearningAgent(eps=0.0)
+    if os.path.exists(qtable_path):
+        with open(qtable_path, "rb") as f:
+            data = pickle.load(f)
+            ql_agent.Q1 = data["Q1"]
+            ql_agent.Q2 = data["Q2"]
+    _WORKER_AGENTS = [
+        _RandomAgent(seed=seed),
+        MCTSAgent(n_simulations=200, seed=seed),
+        AlphaBetaAgent(depth=2, use_move_ordering=True),
+        AlphaBetaAgent(depth=3, use_move_ordering=True),
+        AlphaBetaAgent(depth=4, use_move_ordering=True),
+        _QLWrapper(ql_agent),
+    ]
+
+
+def _run_matchup(args: tuple) -> tuple:
+    """Joue un matchup (i, j) dans le processus worker courant."""
+    i, j, n_games = args
+    wb, ww, d = _play_n(_WORKER_AGENTS[i], _WORKER_AGENTS[j], n_games=n_games)
+    return i, j, wb, ww, d
+
+
 # ── Tournoi ────────────────────────────────────────────────────────────────────
 
 def run_tournament(
@@ -122,50 +155,37 @@ def run_tournament(
     seed:        int = 0,
 ) -> Tuple[List[List[float]], List[str]]:
     """
-    Fait jouer chaque paire d'agents n_games parties.
+    Fait jouer chaque paire d'agents n_games parties en parallèle.
     matrix[i][j] = taux de victoire de l'agent i (Noirs) contre l'agent j (Blancs).
     La diagonale vaut 0.5 par convention.
     """
-    # Charger le modèle QL
-    ql_agent = QLearningAgent(eps=0.0)
-    if os.path.exists(qtable_path):
-        with open(qtable_path, "rb") as f:
-            data = pickle.load(f)
-            ql_agent.Q1 = data["Q1"]
-            ql_agent.Q2 = data["Q2"]
-    else:
-        print(f"  ATTENTION : {qtable_path} introuvable — QL jouera de façon non entraînée.")
-
-    agents: List[Tuple[str, object]] = [
-        ("Random",   _RandomAgent(seed=seed)),
-        ("MCTS-200", MCTSAgent(n_simulations=200, seed=seed)),
-        ("AB-d2",    AlphaBetaAgent(depth=2, use_move_ordering=True)),
-        ("AB-d3",    AlphaBetaAgent(depth=3, use_move_ordering=True)),
-        ("AB-d4",    AlphaBetaAgent(depth=4, use_move_ordering=True)),
-        ("QL",    _QLWrapper(ql_agent)),
-    ]
-
-    names = [a[0] for a in agents]
-    objs  = [a[1] for a in agents]
-    n     = len(agents)
-
+    names = ["Random", "MCTS-200", "AB-d2", "AB-d3", "AB-d4", "QL"]
+    n     = len(names)
     matrix: List[List[float]] = [[0.5] * n for _ in range(n)]
-    total  = n * (n - 1)
-    done   = 0
 
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                continue
-            done += 1
-            print(
-                f"  [{done:2d}/{total}] {names[i]:<10} (N) vs {names[j]:<10} (B)"
-                f" — {n_games} parties ...",
-                end=" ", flush=True,
-            )
-            wb, ww, d = _play_n(objs[i], objs[j], n_games=n_games)
+    tasks  = [(i, j, n_games) for i in range(n) for j in range(n) if i != j]
+    total  = len(tasks)
+    n_cpu  = os.cpu_count() or 4
+    # Réserver 1 cœur pour le processus principal
+    n_workers = max(1, n_cpu - 1)
+
+    print(f"  {total} matchups — {n_workers} processus parallèles (sur {n_cpu} cœurs)")
+
+    done_count = 0
+    with ProcessPoolExecutor(
+        max_workers=n_workers,
+        initializer=_init_pool,
+        initargs=(qtable_path, seed),
+    ) as executor:
+        future_map = {executor.submit(_run_matchup, t): t for t in tasks}
+        for future in as_completed(future_map):
+            i, j, wb, ww, d = future.result()
             matrix[i][j] = wb / n_games
-            print(f"N gagne {matrix[i][j]:.0%}  (B {ww/n_games:.0%}  nul {d/n_games:.0%})")
+            done_count += 1
+            print(
+                f"  [{done_count:2d}/{total}] {names[i]:<10} (N) vs {names[j]:<10} (B)"
+                f" — N {wb/n_games:.0%}  B {ww/n_games:.0%}  nul {d/n_games:.0%}"
+            )
 
     return matrix, names
 

@@ -132,7 +132,7 @@ def _positional_score(board: Board, player: int) -> int:
 
 # ── Feature principale ─────────────────────────────────────────────────────────
 
-@lru_cache(maxsize=2048)
+@lru_cache(maxsize=131072)
 def state_features(board: Board, player: int) -> State:
     """
     Retourne un état discret (5-tuple) — clé de la Q-table.

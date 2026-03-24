@@ -56,7 +56,7 @@ def _positional_score(my_bb: int, opp_bb: int) -> float:
     return float(pos)
 
 
-@lru_cache(maxsize=4096)
+@lru_cache(maxsize=131072)
 def evaluate(board: Board, player: int) -> float:
     """
     Heuristique pour Othello du point de vue 'player' (+1 Noir, -1 Blanc).
