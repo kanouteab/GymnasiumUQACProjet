@@ -15,7 +15,7 @@ Options :
     --skip-tournament  Ignorer le tournoi
     --fresh            Supprimer artifacts/qtable.pkl et dqn_model.pt avant de commencer
     --tournament-games Nombre de parties par matchup (défaut : 20)
-    --dqn-episodes     Nombre d'épisodes DQN (défaut : 5 000)
+    --dqn-episodes     Nombre d'épisodes DQN (défaut : 20 000)
 """
 from __future__ import annotations
 
@@ -43,10 +43,10 @@ def step_train_dqn(n_episodes: int = 5_000) -> None:
     train_dqn(n_episodes=n_episodes)
 
 
-def step_tournament(n_games: int = 20) -> None:
+def step_tournament(n_games: int = 20, static_only: bool = False) -> None:
     _separator("Étape 3 — Tournoi inter-agents")
     from src.experiments.tournament import main as tournament_main
-    tournament_main(n_games=n_games)
+    tournament_main(n_games=n_games, static_only=static_only)
 
 
 def main() -> None:
@@ -56,7 +56,10 @@ def main() -> None:
     parser.add_argument("--skip-tournament", action="store_true", help="Ignorer le tournoi inter-agents")
     parser.add_argument("--fresh",           action="store_true", help="Supprimer qtable.pkl et dqn_model.pt avant de commencer")
     parser.add_argument("--tournament-games", type=int, default=20, help="Parties par matchup (défaut : 20)")
-    parser.add_argument("--dqn-episodes",    type=int, default=5_000, help="Épisodes DQN (défaut : 5 000)")
+    parser.add_argument("--dqn-episodes",    type=int, default=20_000, help="Épisodes DQN (défaut : 20 000)")
+    parser.add_argument("--static-tournament", action="store_true",
+                        help="Tournoi agents statiques seulement (sans QL/DQN) "
+                             "pour vérifier l'ordre de force du curriculum")
     args = parser.parse_args()
 
     if args.fresh:
@@ -81,7 +84,7 @@ def main() -> None:
             print("  AVERTISSEMENT : dqn_model.pt introuvable — DQN jouera non entraîné dans le tournoi.")
 
     if not args.skip_tournament:
-        step_tournament(n_games=args.tournament_games)
+        step_tournament(n_games=args.tournament_games, static_only=args.static_tournament)
     else:
         print("\n[skip] Tournoi ignoré.")
 

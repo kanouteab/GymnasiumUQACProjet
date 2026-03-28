@@ -231,6 +231,7 @@ def plot_tournament(
     matrix:      List[List[float]],
     agent_names: List[str],
     out_dir:     str = "artifacts",
+    out_path:    str = "",
 ) -> str:
     """
     Heatmap NxN des résultats du tournoi.
@@ -302,8 +303,11 @@ def plot_tournament(
 
     plt.colorbar(im, ax=ax, label="Taux de victoire", shrink=0.85)
     plt.tight_layout()
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "tournament.png")
+    if not out_path:
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, "tournament.png")
+    else:
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Heatmap du tournoi → {out_path}")

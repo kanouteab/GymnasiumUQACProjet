@@ -140,6 +140,7 @@ def _init_pool(qtable_path: str, dqn_path: str, seed: int) -> None:
 
     _WORKER_AGENTS = [
         _RandomAgent(seed=seed),
+        MCTSAgent(n_simulations=50,  seed=seed),
         MCTSAgent(n_simulations=200, seed=seed),
         AlphaBetaAgent(depth=2, use_move_ordering=True),
         AlphaBetaAgent(depth=3, use_move_ordering=True),
@@ -159,18 +160,24 @@ def _run_matchup(args: tuple) -> tuple:
 # ── Tournoi ────────────────────────────────────────────────────────────────────
 
 def run_tournament(
-    qtable_path: str = "artifacts/qtable.pkl",
-    dqn_path:    str = "artifacts/dqn_model.pt",
-    n_games:     int = 20,
-    seed:        int = 0,
+    qtable_path:  str  = "artifacts/qtable.pkl",
+    dqn_path:     str  = "artifacts/dqn_model.pt",
+    n_games:      int  = 20,
+    seed:         int  = 0,
+    static_only:  bool = False,
 ) -> Tuple[List[List[float]], List[str]]:
     """
     Fait jouer chaque paire d'agents n_games parties en parallèle.
     matrix[i][j] = taux de victoire de l'agent i (Noirs) contre l'agent j (Blancs).
     La diagonale vaut 0.5 par convention.
+
+    static_only : si True, n'inclut que les 6 agents statiques
+                  (Random, MCTS-50, MCTS-200, AB-d2, AB-d3, AB-d4) — utile pour
+                  vérifier l'ordre de force avant d'entraîner QL/DQN.
     """
     dqn_label = "DQN" if os.path.exists(dqn_path) else "DQN*"
-    names = ["Random", "MCTS-200", "AB-d2", "AB-d3", "AB-d4", "QL", dqn_label]
+    all_names = ["Random", "MCTS-50", "MCTS-200", "AB-d2", "AB-d3", "AB-d4", "QL", dqn_label]
+    names = all_names[:6] if static_only else all_names
     n     = len(names)
     matrix: List[List[float]] = [[0.5] * n for _ in range(n)]
 
@@ -219,25 +226,33 @@ def save_csv(
 
 # ── Point d'entrée ─────────────────────────────────────────────────────────────
 
-def main(n_games: int = 20) -> None:
+def main(n_games: int = 20, static_only: bool = False) -> None:
     from src.experiments.plot_results import plot_tournament
 
     dqn_path = "artifacts/dqn_model.pt"
 
     print("=" * 65)
-    print("  Tournoi inter-agents (7 agents : + DQN)")
+    if static_only:
+        print("  Tournoi agents statiques (6 agents : Random, MCTS-50, MCTS-200, AB-d2/3/4)")
+        print("  Objectif : vérifier l'ordre de force pour le curriculum d'entraînement")
+    else:
+        print("  Tournoi inter-agents (8 agents : + DQN)")
+        if not os.path.exists(dqn_path):
+            print("  ATTENTION : dqn_model.pt introuvable — DQN* jouera non entraîné")
     print(f"  {n_games} parties par sens de jeu (N vs B)")
-    if not os.path.exists(dqn_path):
-        print("  ATTENTION : dqn_model.pt introuvable — DQN* jouera non entraîné")
     print("=" * 65)
 
-    matrix, names = run_tournament(n_games=n_games, dqn_path=dqn_path)
-    save_csv(matrix, names)
+    matrix, names = run_tournament(
+        n_games=n_games, dqn_path=dqn_path, static_only=static_only
+    )
+    csv_path = "artifacts/tournament_static.csv" if static_only else "artifacts/tournament.csv"
+    save_csv(matrix, names, out_path=csv_path)
 
     print()
     _print_summary(matrix, names)
 
-    plot_tournament(matrix, names)
+    png_path = "artifacts/tournament_static.png" if static_only else "artifacts/tournament.png"
+    plot_tournament(matrix, names, out_path=png_path)
 
 
 def _print_summary(matrix: List[List[float]], names: List[str]) -> None:
@@ -270,7 +285,9 @@ def _print_summary(matrix: List[List[float]], names: List[str]) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n-games", type=int, default=20,
-                        help="Nombre de parties par matchup (défaut : 20)")
+    parser.add_argument("--n-games",      type=int,  default=1000,
+                        help="Nombre de parties par matchup (défaut : 1000)")
+    parser.add_argument("--static-only",  action="store_true",
+                        help="Tourner uniquement les 5 agents statiques (sans QL/DQN)")
     args = parser.parse_args()
-    main(n_games=args.n_games)
+    main(n_games=args.n_games, static_only=args.static_only)

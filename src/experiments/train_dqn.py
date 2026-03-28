@@ -208,10 +208,10 @@ def main(n_episodes: int = 20_000) -> None:
     #   eps_reset : eps minimum forcé à l'entrée de la phase (None = premier départ)
     PHASES = [
         {"name": "Random",       "opp": opp_random,  "win_threshold": 0.80, "min_eps": 2000, "max_eps": 8000, "eps_reset": None},
-        {"name": "MCTS-50",      "opp": opp_mcts50,  "win_threshold": 0.40, "min_eps": 1000, "max_eps": 5000, "eps_reset": 0.60},
-        {"name": "MCTS-200",     "opp": opp_mcts200, "win_threshold": 0.25, "min_eps": 1500, "max_eps": 5000, "eps_reset": 0.50},
-        {"name": "AlphaBeta-d2", "opp": opp_ab2,     "win_threshold": 0.20, "min_eps": 1000, "max_eps": 4000, "eps_reset": 0.40},
-        {"name": "AlphaBeta-d3", "opp": opp_ab3,     "win_threshold": 0.15, "min_eps": 1000, "max_eps": 4000, "eps_reset": 0.30},
+        {"name": "MCTS-50",      "opp": opp_mcts50,  "win_threshold": 0.45, "min_eps": 1000, "max_eps": 5000, "eps_reset": 0.60},
+        {"name": "AlphaBeta-d2", "opp": opp_ab2,     "win_threshold": 0.35, "min_eps": 1000, "max_eps": 5000, "eps_reset": 0.50},
+        {"name": "AlphaBeta-d3", "opp": opp_ab3,     "win_threshold": 0.25, "min_eps": 1000, "max_eps": 4000, "eps_reset": 0.40},
+        {"name": "MCTS-200",     "opp": opp_mcts200, "win_threshold": 0.20, "min_eps": 1500, "max_eps": 4000, "eps_reset": 0.30},
         {"name": "AlphaBeta-d4", "opp": opp_ab4,     "win_threshold": None, "min_eps": 1000, "max_eps": 4000, "eps_reset": 0.20},
     ]
 

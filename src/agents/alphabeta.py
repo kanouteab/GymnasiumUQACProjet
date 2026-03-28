@@ -142,8 +142,10 @@ class AlphaBetaAgent:
         moves = get_legal_moves(board, player_to_move)
 
         if not moves:
-            # PASS : on change de joueur sans modifier le plateau
-            return self._alphabeta(board, -player_to_move, depth - 1, alpha, beta, root_player)
+            # PASS : on change de joueur sans modifier le plateau.
+            # La profondeur n'est PAS décrémentée : un PASS n'est pas un coup joué.
+            # is_terminal() protège contre les boucles infinies (2 passes consécutifs).
+            return self._alphabeta(board, -player_to_move, depth, alpha, beta, root_player)
 
         if self.use_move_ordering:
             moves = self._order_moves(board, player_to_move, moves)
