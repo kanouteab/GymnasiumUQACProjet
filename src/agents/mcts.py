@@ -6,6 +6,8 @@ import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
+
 from src.envs.othello_env import (
     get_legal_moves,
     apply_move,
@@ -13,6 +15,7 @@ from src.envs.othello_env import (
     get_winner,
     score,
     Board,
+    _rollout_nb,
 )
 
 Move = Tuple[int, int]  # (x,y) in [0..7]
@@ -190,9 +193,20 @@ class MCTSAgent:
 
     def _simulate_from(self, node: Node) -> float:
         """
-        Rollout random jusqu'au terminal (ou max steps).
-        Retour: valeur du point de vue de node.player_to_move (au départ du rollout).
+        Rollout depuis node jusqu'au terminal (ou rollout_max_steps).
+        Retour: valeur du point de vue de node.player_to_move.
+        Utilise un rollout numba JIT pour bypasser l'overhead Python.
+        Fallback Python uniquement si use_score_rollout_tiebreak=True.
         """
+        if not self.use_score_rollout_tiebreak:
+            return float(_rollout_nb(
+                np.uint64(node.board[0]),
+                np.uint64(node.board[1]),
+                np.int64(node.player_to_move),
+                np.int64(self.rollout_max_steps),
+            ))
+
+        # Fallback Python avec tie-break léger via score
         board = node.board
         player = node.player_to_move
         start_player = player
@@ -214,16 +228,11 @@ class MCTSAgent:
             w = get_winner(board)
             return _value_from_player_perspective(w, start_player)
 
-        # cutoff
-        if not self.use_score_rollout_tiebreak:
-            return 0.0
-
-        # tie-break léger via score relatif
+        # cutoff avec tie-break via score relatif
         s = score(board)
         if s == 0:
             return 0.0
         approx = max(-1.0, min(1.0, s / 64.0))
-        # score est du point de vue Noir: convertir au point de vue start_player
         return approx if start_player == 1 else -approx
 
     def _backpropagate(self, node: Node, value: float) -> None:

@@ -7,6 +7,9 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
+# Le wrap-around uint64 (0 - bb) est intentionnel pour l'isolation du LSB — pas un bug.
+np.seterr(over="ignore")
+
 try:
     import gymnasium as gym
     from gymnasium import spaces
@@ -306,6 +309,83 @@ def _apply_move_bb(
     return _apply_move_nb(my_bb, opp_bb, move_bit)
 
 
+@numba.njit(cache=True)
+def _rollout_nb(
+    black_bb:     np.uint64,
+    white_bb:     np.uint64,
+    start_player: np.int64,
+    max_steps:    np.int64,
+) -> np.float64:
+    """
+    Rollout aléatoire depuis (black_bb, white_bb) jusqu'au terminal ou max_steps.
+    start_player : +1 = Noir, -1 = Blanc (joueur qui joue en premier).
+    Retourne +1 si start_player gagne, -1 s'il perd, 0 nul.
+    Bypass complet de l'overhead Python : appelle directement les kernels numba.
+    """
+    bits_buf = np.empty(64, dtype=np.uint64)
+    player   = start_player   # +1 = Noir joue, -1 = Blanc joue
+
+    for _step in range(max_steps):
+        # Coups légaux du joueur courant
+        if player == np.int64(1):
+            legal_bb = _legal_moves_nb(black_bb, white_bb)
+        else:
+            legal_bb = _legal_moves_nb(white_bb, black_bb)
+
+        if legal_bb == np.uint64(0):
+            # Vérifier si l'autre joueur a aussi aucun coup → terminal
+            if player == np.int64(1):
+                other_legal = _legal_moves_nb(white_bb, black_bb)
+            else:
+                other_legal = _legal_moves_nb(black_bb, white_bb)
+            if other_legal == np.uint64(0):
+                break   # terminal : les deux joueurs passent consécutivement
+            # PASS : passer la main sans jouer
+            player = -player
+            continue
+
+        # Extraire les bits légaux dans bits_buf
+        n  = np.int64(0)
+        bb = legal_bb
+        while bb != np.uint64(0):
+            lsb      = bb & (~bb + np.uint64(1))   # isole le bit le moins significatif
+            bits_buf[n] = lsb
+            bb       ^= lsb
+            n        += np.int64(1)
+
+        # Choisir un coup aléatoire
+        idx      = np.random.randint(np.int64(0), n)
+        move_bit = bits_buf[idx]
+
+        # Appliquer le coup
+        if player == np.int64(1):
+            new_my, new_opp = _apply_move_nb(black_bb, white_bb, move_bit)
+            black_bb = new_my
+            white_bb = new_opp
+        else:
+            new_my, new_opp = _apply_move_nb(white_bb, black_bb, move_bit)
+            white_bb = new_my
+            black_bb = new_opp
+
+        player = -player
+
+    # Déterminer le gagnant via le compte de pions
+    bc = _popcount_nb(black_bb)
+    wc = _popcount_nb(white_bb)
+    if bc > wc:
+        winner = np.int64(1)
+    elif wc > bc:
+        winner = np.int64(-1)
+    else:
+        winner = np.int64(0)
+
+    if winner == np.int64(0):
+        return np.float64(0.0)
+    if winner == start_player:
+        return np.float64(1.0)
+    return np.float64(-1.0)
+
+
 # ─────────────────────────────────────────────────────────────────
 # API publique  (même interface qu'avant pour le reste du projet)
 # ─────────────────────────────────────────────────────────────────
@@ -343,7 +423,7 @@ def get_legal_moves(board: Board, player: int) -> List[Move]:
     moves: List[Move] = []
     bb = legal_bb
     while bb:
-        lsb = bb & (-bb)                    # np.uint64 : -bb wrappe en uint64 (deux's complement)
+        lsb = bb & (np.uint64(0) - bb)      # two's complement en uint64 pur (pas de warning)
         sq  = int(lsb).bit_length() - 1     # int() requis : np.uint64 n'a pas .bit_length()
         moves.append((sq >> 3, sq & 7))     # (sq//8, sq%8)
         bb ^= lsb                           # retire ce bit
@@ -402,12 +482,12 @@ def board_to_array(board: Board) -> np.ndarray:
     arr = np.zeros(64, dtype=np.int8)
     bb = black_bb
     while bb:
-        lsb = bb & (-bb)
+        lsb = bb & (np.uint64(0) - bb)
         arr[int(lsb).bit_length() - 1] = 1
         bb ^= lsb
     bb = white_bb
     while bb:
-        lsb = bb & (-bb)
+        lsb = bb & (np.uint64(0) - bb)
         arr[int(lsb).bit_length() - 1] = -1
         bb ^= lsb
     return arr.reshape(8, 8)

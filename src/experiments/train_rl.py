@@ -3,19 +3,26 @@
 Entraînement Q-Learning avec toutes les améliorations.
 
 Améliorations vs v1 :
-  1. État enrichi (score positionnel)  → via state_features()
-  2. Double Q-Learning                 → via QLearningAgent
-  3. Reward shaping (coins + mobilité) → récompenses intermédiaires non nulles
-  4. Self-play (0% Phase 1, ~30% phases avancées)
-  5. Curriculum adaptatif basé sur le win rate :
-       Phase 1 : vs Random   (seuil 80%, min 2000 ep, max 8000 ep)
-       Phase 2 : vs MCTS-50  (seuil 40%, min 1000 ep, max 5000 ep)
-       Phase 3 : vs MCTS-200 (seuil 25%, min 1500 ep, max 5000 ep)
-       Phase 4 : vs AB-d2    (seuil 20%, min 1000 ep, max 4000 ep)
-       Phase 5 : vs AB-d3    (seuil 15%, min 1000 ep, max 4000 ep)
-       Phase 6 : vs AB-d4    (finale,    min 1000 ep, max jusqu'au 20000 totales)
+  1. État enrichi (score positionnel)   → via state_features()
+  2. Double Q-Learning (Q1 + Q2)        → via QLearningAgent
+  3. Reward shaping (coins + mobilité)  → récompenses intermédiaires non nulles
+  4. Self-play (0% Phase 1, 30% phases 2-6)
+  5. Curriculum par plafond fixe (sans seuil de win-rate) :
+       Phase 1 : vs Random       (10 000 ep, selfplay 0%)
+       Phase 2 : vs MCTS-50      (10 000 ep, selfplay 30%, ε reset ≥ 0.60)
+       Phase 3 : vs AlphaBeta-d2 (10 000 ep, selfplay 30%, ε reset ≥ 0.50)
+       Phase 4 : vs AlphaBeta-d3 (10 000 ep, selfplay 30%, ε reset ≥ 0.40)
+       Phase 5 : vs MCTS-200     (10 000 ep, selfplay 30%, ε reset ≥ 0.30)
+       Phase 6 : vs AlphaBeta-d4 (10 000 ep, selfplay 30%, ε reset ≥ 0.20)
   6. Epsilon reseté à chaque changement de phase (injection de curiosité)
-  7. Plafond global de 20 000 épisodes
+  7. Meilleur checkpoint par phase restauré à chaque transition (évite la régression)
+  Total : 60 000 épisodes (6 phases × 10 000)
+
+Sorties :
+  artifacts/qtable.pkl                  — Q-tables finales (Q1 + Q2)
+  artifacts/ql_phaseN_NOM_best.pkl      — meilleures Q-tables par phase (N = 1..6)
+  artifacts/training_stats.csv          — win_rate / wr_vs_opp / eps par tranche de 200 ep
+  artifacts/ql_learning_curve.png       — courbe d'apprentissage
 
 Lancement :
     python -m src.experiments.train_rl
@@ -23,6 +30,7 @@ Lancement :
 from __future__ import annotations
 
 import pickle
+import copy
 import csv
 import os
 import random
@@ -254,15 +262,15 @@ def main() -> None:
     #   selfplay  : fraction d'épisodes joués en self-play (0 = aucun)
     #   eps_reset : eps minimum forcé à l'entrée de la phase (None = premier départ)
     PHASES = [
-        {"name": "Random",       "opp": opp_random,  "win_threshold": 0.80, "min_eps": 2000, "max_eps": 8000, "selfplay": 0.0,  "eps_reset": None},
-        {"name": "MCTS-50",      "opp": opp_mcts50,  "win_threshold": 0.45, "min_eps": 1000, "max_eps": 5000, "selfplay": 0.30, "eps_reset": 0.60},
-        {"name": "AlphaBeta-d2", "opp": opp_ab2,     "win_threshold": 0.35, "min_eps": 1000, "max_eps": 5000, "selfplay": 0.30, "eps_reset": 0.50},
-        {"name": "AlphaBeta-d3", "opp": opp_ab3,     "win_threshold": 0.25, "min_eps": 1000, "max_eps": 4000, "selfplay": 0.30, "eps_reset": 0.40},
-        {"name": "MCTS-200",     "opp": opp_mcts200, "win_threshold": 0.20, "min_eps": 1500, "max_eps": 4000, "selfplay": 0.30, "eps_reset": 0.30},
-        {"name": "AlphaBeta-d4", "opp": opp_ab4,     "win_threshold": None, "min_eps": 1000, "max_eps": None, "selfplay": 0.30, "eps_reset": 0.20},
+        {"name": "Random",       "opp": opp_random,  "win_threshold": None, "min_eps": 10000, "max_eps": 10000, "selfplay": 0.0,  "eps_reset": None},
+        {"name": "MCTS-50",      "opp": opp_mcts50,  "win_threshold": None, "min_eps": 10000, "max_eps": 10000, "selfplay": 0.30, "eps_reset": 0.60},
+        {"name": "AlphaBeta-d2", "opp": opp_ab2,     "win_threshold": None, "min_eps": 10000, "max_eps": 10000, "selfplay": 0.30, "eps_reset": 0.50},
+        {"name": "AlphaBeta-d3", "opp": opp_ab3,     "win_threshold": None, "min_eps": 10000, "max_eps": 10000, "selfplay": 0.30, "eps_reset": 0.40},
+        {"name": "MCTS-200",     "opp": opp_mcts200, "win_threshold": None, "min_eps": 10000, "max_eps": 10000, "selfplay": 0.30, "eps_reset": 0.30},
+        {"name": "AlphaBeta-d4", "opp": opp_ab4,     "win_threshold": None, "min_eps": 10000, "max_eps": 10000, "selfplay": 0.30, "eps_reset": 0.20},
     ]
 
-    TOTAL_EPISODES = 50_000
+    TOTAL_EPISODES = 60_000
     log_every      = 200   # log compact toutes les N épisodes
 
     wins_total = {1: 0, -1: 0, 0: 0}
@@ -270,8 +278,10 @@ def main() -> None:
     recent_vs_opp: List[int] = []   # hors self-play (critère de sortie, signal non pollué)
     stats:         List[dict] = []
 
-    current_phase = 0
-    phase_ep      = 0   # épisodes joués dans la phase courante
+    current_phase   = 0
+    phase_ep        = 0   # épisodes joués dans la phase courante
+    best_wr_phase   = 0.0          # meilleur WR vs-opp dans la phase courante
+    best_ckpt_q: Optional[dict] = None  # deepcopy de {"Q1": ..., "Q2": ...}
 
     print("=" * 65)
     print("  Q-Learning — Double Q + Reward Shaping + Curriculum adaptatif + Self-Play")
@@ -327,6 +337,19 @@ def main() -> None:
 
             if crit_wr or crit_cap:
                 reason = "win-rate" if crit_wr else "plafond"
+                # ── Restaurer le meilleur modèle de cette phase ─────────────
+                if best_ckpt_q is not None:
+                    agent.Q1 = best_ckpt_q["Q1"]
+                    agent.Q2 = best_ckpt_q["Q2"]
+                    print(f"  [ckpt] Meilleur modèle phase {current_phase+1} ({best_wr_phase:.1%} WR vs-opp) restauré")
+                    os.makedirs("artifacts", exist_ok=True)
+                    ph_name_safe = ph["name"].replace("-", "").replace(" ", "_")
+                    phase_ckpt_path = f"artifacts/ql_phase{current_phase+1}_{ph_name_safe}_best.pkl"
+                    with open(phase_ckpt_path, "wb") as _f:
+                        pickle.dump(best_ckpt_q, _f)
+                    print(f"  [ckpt] Sauvegardé → {phase_ckpt_path}")
+                best_wr_phase = 0.0
+                best_ckpt_q   = None
                 current_phase += 1
                 phase_ep       = 0
                 recent_vs_opp  = []
@@ -339,11 +362,32 @@ def main() -> None:
                     f"(raison : {reason}, ε→{agent.eps:.2f}) ***"
                 )
                 print()
+        else:
+            # Dernière phase — appliquer le plafond d'épisodes si défini
+            max_ep = ph["max_eps"]
+            if max_ep is not None and phase_ep >= max_ep:
+                # Restaurer et sauvegarder le meilleur modèle de la dernière phase
+                if best_ckpt_q is not None:
+                    agent.Q1 = best_ckpt_q["Q1"]
+                    agent.Q2 = best_ckpt_q["Q2"]
+                    print(f"  [ckpt] Meilleur modèle phase {current_phase+1} ({best_wr_phase:.1%} WR vs-opp) restauré")
+                    os.makedirs("artifacts", exist_ok=True)
+                    ph_name_safe = ph["name"].replace("-", "").replace(" ", "_")
+                    phase_ckpt_path = f"artifacts/ql_phase{current_phase+1}_{ph_name_safe}_best.pkl"
+                    with open(phase_ckpt_path, "wb") as _f:
+                        pickle.dump(best_ckpt_q, _f)
+                    print(f"  [ckpt] Sauvegardé → {phase_ckpt_path}")
+                print(f"\n  *** Fin — phase {current_phase+1} terminée (plafond) ***\n")
+                break
 
         # ── Log périodique ───────────────────────────────────────────────────
         if ep_total % log_every == 0:
             wr     = recent.count(1) / len(recent)
             wr_opp = recent_vs_opp.count(1) / len(recent_vs_opp) if recent_vs_opp else 0.0
+            # Sauvegarder le meilleur modèle de la phase courante (in-memory)
+            if wr_opp > best_wr_phase:
+                best_wr_phase = wr_opp
+                best_ckpt_q   = {"Q1": copy.deepcopy(agent.Q1), "Q2": copy.deepcopy(agent.Q2)}
             phase_name = PHASES[current_phase]["name"]
             elapsed = time.time() - t0
             em, es  = divmod(int(elapsed), 60)

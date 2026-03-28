@@ -3,16 +3,20 @@
 Entraînement DQN pour Othello.
 
 Architecture : CNN 3 canaux (mes pions / pions adverses / coups légaux)
+              Replay buffer 100 000 | Target network | Gradient clip 0.5
 Device       : CUDA si disponible, sinon CPU
-Curriculum adaptatif basé sur le win rate :
-  Phase 1 : vs Random      (seuil 80%, min 2000 ep, max  8000 ep)
-  Phase 2 : vs MCTS-50     (seuil 40%, min 1000 ep, max  5000 ep)
-  Phase 3 : vs MCTS-200    (seuil 25%, min 1500 ep, max  5000 ep)
-  Phase 4 : vs AB-d2       (seuil 20%, min 1000 ep, max  4000 ep)
-  Phase 5 : vs AB-d3       (seuil 15%, min 1000 ep, max  4000 ep)
-  Phase 6 : vs AB-d4       (finale,    min 1000 ep, max jusqu'au 20000 totales)
+
+Curriculum par plafond fixe (6 phases × 10 000 épisodes max) :
+  Phase 1 : vs Random       (sortie anticipée si WR ≥ 80%, min 2000 ep, max 10 000 ep)
+  Phase 2 : vs MCTS-50      (sortie anticipée si WR ≥ 35%, min 1000 ep, max 10 000 ep)
+  Phase 3 : vs AlphaBeta-d2 (sortie anticipée si WR ≥ 12%, min 1000 ep, max 10 000 ep)
+  Phase 4 : vs AlphaBeta-d3 (sortie anticipée si WR ≥  8%, min 1000 ep, max 10 000 ep)
+  Phase 5 : vs MCTS-200     (sortie anticipée si WR ≥ 18%, min 1500 ep, max 10 000 ep)
+  Phase 6 : vs AlphaBeta-d4 (pas de seuil,               min 1000 ep, max 10 000 ep)
+Le seuil de win-rate déclenche une sortie anticipée ; sans lui, la phase s'arrête
+au plafond de 10 000 épisodes. Total max : 60 000 épisodes.
 Epsilon reseté à chaque changement de phase (injection de curiosité).
-Plafond global de 20 000 épisodes.
+Le meilleur checkpoint (WR vs adversaire de phase) est restauré à chaque transition.
 
 Boucle par épisode :
   - L'agent joue toujours les Noirs (+1)
@@ -21,19 +25,21 @@ Boucle par épisode :
   - Reward shaping : coins ±0.3, mobilité ×0.01 (petits vs ±1 terminal)
 
 Sorties :
-  artifacts/dqn_model.pt              — poids du réseau
-  artifacts/dqn_training_stats.csv    — win_rate / eps / avg_loss par tranche
+  artifacts/dqn_model.pt              — poids finaux du réseau
+  artifacts/dqn_phaseN_NOM_best.pt    — meilleurs poids par phase (N = 1..6)
+  artifacts/dqn_training_stats.csv    — win_rate / eps / avg_loss par tranche de 200 ep
   artifacts/dqn_learning_curve.png    — courbe 3 panneaux (win rate, loss, ε)
   artifacts/dqn_final_eval.png        — barres d'évaluation finale
 
 Lancement :
     python -m src.experiments.train_dqn
-    python -m src.experiments.train_dqn --episodes 10000
+    python -m src.experiments.train_dqn --episodes 60000
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import io
 import os
 import random
 import time
@@ -174,7 +180,7 @@ def evaluate(
 
 # ── Main ────────────────────────────────────────────────────────────────────────
 
-def main(n_episodes: int = 20_000) -> None:
+def main(n_episodes: int = 50_000) -> None:
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("=" * 65)
@@ -207,12 +213,12 @@ def main(n_episodes: int = 20_000) -> None:
     # Curriculum adaptatif : sortie par win-rate ou plafond de sécurité.
     #   eps_reset : eps minimum forcé à l'entrée de la phase (None = premier départ)
     PHASES = [
-        {"name": "Random",       "opp": opp_random,  "win_threshold": 0.80, "min_eps": 2000, "max_eps": 8000, "eps_reset": None},
-        {"name": "MCTS-50",      "opp": opp_mcts50,  "win_threshold": 0.45, "min_eps": 1000, "max_eps": 5000, "eps_reset": 0.60},
-        {"name": "AlphaBeta-d2", "opp": opp_ab2,     "win_threshold": 0.35, "min_eps": 1000, "max_eps": 5000, "eps_reset": 0.50},
-        {"name": "AlphaBeta-d3", "opp": opp_ab3,     "win_threshold": 0.25, "min_eps": 1000, "max_eps": 4000, "eps_reset": 0.40},
-        {"name": "MCTS-200",     "opp": opp_mcts200, "win_threshold": 0.20, "min_eps": 1500, "max_eps": 4000, "eps_reset": 0.30},
-        {"name": "AlphaBeta-d4", "opp": opp_ab4,     "win_threshold": None, "min_eps": 1000, "max_eps": 4000, "eps_reset": 0.20},
+        {"name": "Random",       "opp": opp_random,  "win_threshold": 0.80, "min_eps": 2000,  "max_eps": 10000, "eps_reset": None},
+        {"name": "MCTS-50",      "opp": opp_mcts50,  "win_threshold": 0.35, "min_eps": 1000,  "max_eps": 10000, "eps_reset": 0.60},
+        {"name": "AlphaBeta-d2", "opp": opp_ab2,     "win_threshold": 0.12, "min_eps": 1000,  "max_eps": 10000, "eps_reset": 0.50},
+        {"name": "AlphaBeta-d3", "opp": opp_ab3,     "win_threshold": 0.08, "min_eps": 1000,  "max_eps": 10000, "eps_reset": 0.40},
+        {"name": "MCTS-200",     "opp": opp_mcts200, "win_threshold": 0.18, "min_eps": 1500,  "max_eps": 10000, "eps_reset": 0.30},
+        {"name": "AlphaBeta-d4", "opp": opp_ab4,     "win_threshold": None, "min_eps": 1000,  "max_eps": 10000, "eps_reset": 0.20},
     ]
 
     log_every   = 200
@@ -223,8 +229,10 @@ def main(n_episodes: int = 20_000) -> None:
     recent_vs_opp: List[int]  = []   # hors self-play (critère de sortie) — identique à recent pour DQN
     stats:         List[dict] = []
 
-    current_phase = 0
-    phase_ep      = 0
+    current_phase   = 0
+    phase_ep        = 0
+    best_wr_phase   = 0.0                    # meilleur WR vs-opp dans la phase courante
+    best_ckpt_bytes: Optional[bytes] = None  # checkpoint réseau (in-memory)
 
     for i, ph in enumerate(PHASES):
         thr = f"{ph['win_threshold']:.0%}" if ph['win_threshold'] is not None else "—"
@@ -253,22 +261,40 @@ def main(n_episodes: int = 20_000) -> None:
         phase_ep += 1
 
         # ── Critère de sortie de phase ──────────────────────────────────────
-        if current_phase < len(PHASES) - 1:
-            wr_opp  = recent_vs_opp.count(1) / len(recent_vs_opp) if recent_vs_opp else 0.0
-            win_thr = ph["win_threshold"]
-            max_ep  = ph["max_eps"]
-            min_ep  = ph["min_eps"]
+        wr_opp  = recent_vs_opp.count(1) / len(recent_vs_opp) if recent_vs_opp else 0.0
+        win_thr = ph["win_threshold"]
+        max_ep  = ph["max_eps"]
+        min_ep  = ph["min_eps"]
 
-            crit_wr = (
-                phase_ep >= min_ep
-                and len(recent_vs_opp) >= log_every
-                and win_thr is not None
-                and wr_opp >= win_thr
-            )
-            crit_cap = (max_ep is not None and phase_ep >= max_ep)
+        crit_wr = (
+            phase_ep >= min_ep
+            and len(recent_vs_opp) >= log_every
+            and win_thr is not None
+            and wr_opp >= win_thr
+        )
+        crit_cap = (max_ep is not None and phase_ep >= max_ep)
 
-            if crit_wr or crit_cap:
-                reason = "win-rate" if crit_wr else "plafond"
+        if crit_wr or crit_cap:
+            reason = "win-rate" if crit_wr else "plafond"
+            # ── Restaurer le meilleur modèle de cette phase ─────────────────
+            if best_ckpt_bytes is not None:
+                buf = io.BytesIO(best_ckpt_bytes)
+                ck  = torch.load(buf, map_location=agent.device, weights_only=True)
+                agent.online_net.load_state_dict(ck["online_net"])
+                agent.target_net.load_state_dict(ck["target_net"])
+                agent.target_net.eval()
+                print(f"  [ckpt] Meilleur modèle phase {current_phase+1} ({best_wr_phase:.1%} WR vs-opp) restauré")
+                # Sauvegarde sur disque pour comparaison post-entraînement
+                os.makedirs("artifacts", exist_ok=True)
+                ph_name_safe = ph["name"].replace("-", "").replace(" ", "_")
+                phase_ckpt_path = f"artifacts/dqn_phase{current_phase+1}_{ph_name_safe}_best.pt"
+                with open(phase_ckpt_path, "wb") as _f:
+                    _f.write(best_ckpt_bytes)
+                print(f"  [ckpt] Sauvegardé → {phase_ckpt_path}")
+            best_wr_phase   = 0.0
+            best_ckpt_bytes = None
+
+            if current_phase < len(PHASES) - 1:
                 current_phase += 1
                 phase_ep       = 0
                 recent_vs_opp  = []
@@ -281,11 +307,23 @@ def main(n_episodes: int = 20_000) -> None:
                     f"(raison : {reason}, ε→{agent.eps:.2f}) ***"
                 )
                 print()
+            else:
+                print(f"\n  *** Fin — phase {current_phase+1} terminée ({reason}) ***\n")
+                break
 
         # ── Log périodique ────────────────────────────────────────────────
         if ep_total % log_every == 0:
             wr     = recent.count(1) / len(recent)
             wr_opp = recent_vs_opp.count(1) / len(recent_vs_opp) if recent_vs_opp else 0.0
+            # Sauvegarder le meilleur modèle de la phase courante (in-memory)
+            if wr_opp > best_wr_phase:
+                best_wr_phase = wr_opp
+                buf = io.BytesIO()
+                torch.save({
+                    "online_net": agent.online_net.state_dict(),
+                    "target_net": agent.target_net.state_dict(),
+                }, buf)
+                best_ckpt_bytes = buf.getvalue()
             phase_name = PHASES[current_phase]["name"]
             elapsed = time.time() - t0
             em, es  = divmod(int(elapsed), 60)
@@ -373,7 +411,7 @@ def main(n_episodes: int = 20_000) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--episodes", type=int, default=20_000,
-                        help="Nombre d'épisodes (défaut : 20 000)")
+    parser.add_argument("--episodes", type=int, default=60_000,
+                        help="Nombre d'épisodes (défaut : 60 000)")
     args = parser.parse_args()
     main(n_episodes=args.episodes)

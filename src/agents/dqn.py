@@ -297,7 +297,7 @@ class DQNAgent:
         loss = F.smooth_l1_loss(q_sa, targets)
         self.optimizer.zero_grad()
         loss.backward()
-        nn.utils.clip_grad_norm_(self.online_net.parameters(), 1.0)
+        nn.utils.clip_grad_norm_(self.online_net.parameters(), 0.5)
         self.optimizer.step()
 
         self.steps += 1
